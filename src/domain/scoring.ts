@@ -1,5 +1,7 @@
 import { SCORE_WEIGHTS } from './config'
-import type { ComponentScores, SearchTopicData } from './types'
+import { assertScorableTopicData } from './dataContract'
+import { SCORE_COMPONENT_KEYS } from './types'
+import type { ComponentScores, ComponentWeights, ScoredTopic, ScoringDiagnostic, SearchTopicData } from './types'
 
 export const clamp = (value: number) => Math.max(0, Math.min(100, value))
 
@@ -32,33 +34,140 @@ export function momentumSignal(observations: number[]) {
 }
 
 export function consistencySignal(observations: number[]) {
-  const values = observations.slice(-30)
+  const values = observations
   if (values.length < 2) return 0
   const mean = average(values)
   if (mean === 0) return 0
   const variance = average(values.map((value) => (value - mean) ** 2))
-  // A stable elevated baseline scores higher than a one-day spike.
+  // A stable elevated baseline scores higher than a one-day spike across the selected history.
   return clamp(100 * (1 - Math.sqrt(variance) / mean))
 }
 
-export function weightedScore(scores: ComponentScores, weights: Record<keyof ComponentScores, number>) {
-  return scores.searchInterest * weights.searchInterest + scores.growth * weights.growth + scores.momentum * weights.momentum + scores.consistency * weights.consistency
+/** Rewards a recent peak above the earlier selected-history baseline; it is normalized with every other component below. */
+export function breakoutSignal(observations: number[]) {
+  if (observations.length < 14) return 0
+  const recentPeak = Math.max(...observations.slice(-7))
+  const baseline = average(observations.slice(0, -7))
+  return Math.max(0, recentPeak - baseline) / Math.max(1, baseline)
+}
+
+/** Apply the same min–max cohort normalization to every raw scoring component. */
+export function normalizeComponentScores(rawScores: ComponentScores[]): ComponentScores[] {
+  const normalizedByComponent = Object.fromEntries(
+    SCORE_COMPONENT_KEYS.map((component) => [component, normalize(rawScores.map((scores) => scores[component]))]),
+  ) as Record<keyof ComponentScores, number[]>
+
+  return rawScores.map((_, index) => ({
+    searchInterest: normalizedByComponent.searchInterest[index],
+    growth: normalizedByComponent.growth[index],
+    momentum: normalizedByComponent.momentum[index],
+    consistency: normalizedByComponent.consistency[index],
+    breakout: normalizedByComponent.breakout[index],
+  }))
+}
+
+export function weightedContributions(scores: ComponentScores, weights: ComponentWeights): ComponentScores {
+  return {
+    searchInterest: scores.searchInterest * weights.searchInterest,
+    growth: scores.growth * weights.growth,
+    momentum: scores.momentum * weights.momentum,
+    consistency: scores.consistency * weights.consistency,
+    breakout: scores.breakout * weights.breakout,
+  }
+}
+
+export function weightedScore(scores: ComponentScores, weights: ComponentWeights) {
+  return SCORE_COMPONENT_KEYS.reduce((total, component) => total + scores[component] * weights[component], 0)
 }
 
 export function scoreTopics(data: SearchTopicData[]) {
+  assertScorableTopicData(data)
   const raw = data.map((item) => {
-    const observations = item.observations.map(({ interest }) => interest)
-    return { item, interest: average(observations.slice(-7)), growth: growthSignal(observations), momentum: momentumSignal(observations), consistency: consistencySignal(observations) }
-  })
-  const interest = normalize(raw.map((item) => item.interest))
-  const growth = normalize(raw.map((item) => item.growth))
-  const momentum = normalize(raw.map((item) => item.momentum))
-  return raw.map((entry, index) => {
-    const componentScores: ComponentScores = { searchInterest: interest[index], growth: growth[index], momentum: momentum[index], consistency: entry.consistency }
+    const observations = item.observations.map((observation) => {
+      if (observation.availability !== 'available') throw new Error(`Candidate ${item.id} has missing interest data and cannot be scored`)
+      return observation.interest
+    })
     return {
-      id: entry.item.id, topic: entry.item.topic, category: entry.item.category, componentScores,
-      overallScore: weightedScore(componentScores, SCORE_WEIGHTS.overall),
-      trendingScore: weightedScore(componentScores, SCORE_WEIGHTS.trending),
+      item,
+      componentScores: {
+        searchInterest: average(observations.slice(-7)),
+        growth: growthSignal(observations),
+        momentum: momentumSignal(observations),
+        consistency: consistencySignal(observations),
+        breakout: breakoutSignal(observations),
+      },
     }
   })
+  const componentScores = normalizeComponentScores(raw.map((entry) => entry.componentScores))
+  return raw.map((entry, index) => {
+    const scores = componentScores[index]
+    const finalScore = weightedScore(scores, SCORE_WEIGHTS.overall)
+    return {
+      id: entry.item.id,
+      topic: entry.item.topic,
+      normalizedQuery: entry.item.normalizedQuery,
+      category: entry.item.category,
+      provenance: entry.item.provenance,
+      componentScores: scores,
+      finalScore,
+      overallScore: finalScore,
+      trendingScore: weightedScore(scores, SCORE_WEIGHTS.trending),
+    }
+  })
+}
+
+function profileForScoreType(scoreType: 'overallScore' | 'trendingScore') {
+  return scoreType === 'overallScore' ? 'overall' : 'trending'
+}
+
+/**
+ * Produce one complete, flattened diagnostic row per ranked candidate. The caller supplies the
+ * source label so a replay fixture cannot be mistaken for a live Google measurement.
+ */
+export function buildScoringDiagnostics(
+  entries: ScoredTopic[],
+  scoreType: 'overallScore' | 'trendingScore' = 'overallScore',
+  source = 'Unspecified source',
+): ScoringDiagnostic[] {
+  const scoreProfile = profileForScoreType(scoreType)
+  const weights = SCORE_WEIGHTS[scoreProfile]
+  return entries.map((entry) => {
+    const contributions = weightedContributions(entry.componentScores, weights)
+    const finalScore = entry[scoreType]
+    return {
+      source,
+      scoreProfile,
+      query: entry.topic,
+      category: entry.category,
+      finalScore,
+      searchInterestComponent: entry.componentScores.searchInterest,
+      growthComponent: entry.componentScores.growth,
+      momentumComponent: entry.componentScores.momentum,
+      consistencyComponent: entry.componentScores.consistency,
+      breakoutComponent: entry.componentScores.breakout,
+      searchInterestWeight: weights.searchInterest,
+      growthWeight: weights.growth,
+      momentumWeight: weights.momentum,
+      consistencyWeight: weights.consistency,
+      breakoutWeight: weights.breakout,
+      searchInterestWeightedContribution: contributions.searchInterest,
+      growthWeightedContribution: contributions.growth,
+      momentumWeightedContribution: contributions.momentum,
+      consistencyWeightedContribution: contributions.consistency,
+      breakoutWeightedContribution: contributions.breakout,
+      finalWeightedContribution: weightedScore(entry.componentScores, weights),
+    }
+  })
+}
+
+/** Development-only caller: expose all replay-derived score inputs in the browser console. */
+export function reportScoringDiagnostics(
+  entries: ScoredTopic[],
+  scoreType: 'overallScore' | 'trendingScore',
+  source: string,
+) {
+  const diagnostics = buildScoringDiagnostics(entries, scoreType, source)
+  console.info(`NowRanks scoring diagnostics: ${source}. Values are replay/fixture-derived, not live Google measurements.`)
+  console.table(diagnostics)
+  return diagnostics
 }

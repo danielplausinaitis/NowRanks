@@ -56,11 +56,26 @@ export const googleTrendingNowReplay: GoogleTrendingNowReplayResponse = {
   },
 }
 
+const REPLAY_HISTORY_DAYS = 365
+const RECENT_REPLAY_DAYS = 30
+
+/**
+ * Deterministic replay-only historical interest. The final 30 values intentionally retain the
+ * prior fixture generator so 24H, 7D, and 30D behavior remains unchanged.
+ */
 export const googleInterestReplayFixture: Record<string, number[]> = Object.fromEntries(
-  queries.map(([query], index) => [query.toLocaleLowerCase('en-US'), Array.from({ length: 30 }, (_, day) => {
-    const baseline = 22 + (index * 13) % 48
-    const lift = day < 16 ? 0 : (day - 15) * ((index % 5) + 1)
-    const variation = ((index * 7 + day * 3) % 9) - 4
-    return Math.max(0, Math.min(100, baseline + lift + variation))
+  queries.map(([query], index) => [query.toLocaleLowerCase('en-US'), Array.from({ length: REPLAY_HISTORY_DAYS }, (_, day) => {
+    const recentDay = day - (REPLAY_HISTORY_DAYS - RECENT_REPLAY_DAYS)
+    if (recentDay >= 0) {
+      const baseline = 22 + (index * 13) % 48
+      const lift = recentDay < 16 ? 0 : (recentDay - 15) * ((index % 5) + 1)
+      const variation = ((index * 7 + recentDay * 3) % 9) - 4
+      return Math.max(0, Math.min(100, baseline + lift + variation))
+    }
+
+    const baseline = 28 + (index * 11) % 42
+    const seasonalVariation = ((index * 5 + day * 7) % 17) - 8
+    const longTermDrift = Math.floor(day / 30) * ((index % 3) - 1)
+    return Math.max(0, Math.min(100, baseline + seasonalVariation + longTermDrift))
   })]),
 )

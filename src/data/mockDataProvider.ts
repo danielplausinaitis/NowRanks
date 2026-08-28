@@ -6,7 +6,7 @@ const topicSeeds: Array<[string, Category]> = [
 ]
 
 const dates = Array.from({ length: 31 }, (_, index) => `2026-08-${String(index + 1).padStart(2, '0')}`)
-function series(index: number): TopicObservation[] {
+function series(index: number, candidateId: string): TopicObservation[] {
   const base = 190 + ((index * 73) % 1400)
   const growth = ((index * 19) % 38) - 10
   const acceleration = index % 5 === 0 ? 2.8 : index % 3 === 0 ? 1.1 : 0.35
@@ -14,16 +14,44 @@ function series(index: number): TopicObservation[] {
   return dates.map((date, day) => {
     const progress = Math.max(0, day - 16)
     const pulse = Math.sin((index + 2) * (day + 1)) * base * volatility
-    return { date, interest: Math.max(15, Math.round(base + day * growth + progress * progress * acceleration + pulse)) }
+    return { candidateId, date, observedAt: `${date}T00:00:00.000Z`, availability: 'available', interest: Math.max(15, Math.round(base + day * growth + progress * progress * acceleration + pulse)) }
   })
 }
 
-const data: SearchTopicData[] = topicSeeds.map(([topic, category], index) => ({ id: `topic-${index + 1}`, topic, category, observations: series(index) }))
-const yesterdayData = data.map((item, index) => ({ ...item, observations: item.observations.map((observation, day) => ({ ...observation, interest: Math.max(1, observation.interest - (day > 23 ? ((index % 9) - 4) * 120 : 0)) })) }))
+const data: SearchTopicData[] = topicSeeds.map(([topic, category], index) => {
+  const id = `topic-${index + 1}`
+  return {
+    id,
+    topic,
+    normalizedQuery: topic.toLocaleLowerCase('en-US'),
+    category,
+    provenance: {
+      providerId: 'mock-search-data',
+      dataMode: 'test',
+      sourceObservedAt: '2026-08-31T00:00:00.000Z',
+      ingestedAt: '2026-08-31T00:00:00.000Z',
+      geographicScope: { kind: 'global' },
+      collectionMethod: 'deterministic-test-data',
+      crossQueryComparability: { status: 'comparable', basis: 'controlled test data' },
+    },
+    observations: series(index, id),
+  }
+})
+const yesterdayData = data.map((item, index) => ({
+  ...item,
+  observations: item.observations.map((observation, day) => observation.availability === 'missing'
+    ? observation
+    : { ...observation, interest: Math.max(1, observation.interest - (day > 23 ? ((index % 9) - 4) * 120 : 0)) }),
+}))
 
 export class MockSearchDataProvider implements SearchDataProvider {
-  async getCandidates(): Promise<SearchTopic[]> { return data.map(({ id, topic, category }) => ({ id, topic, category })) }
+  async getCandidates(): Promise<SearchTopic[]> { return data.map(({ observations, ...candidate }) => candidate) }
   async getObservations(topicId: string, window: TimeWindow): Promise<TopicObservation[]> { const item = data.find((candidate) => candidate.id === topicId); if (!item) return []; const count = window === '24H' ? 1 : window === '7D' ? 7 : window === '30D' ? 30 : 365; return item.observations.slice(-count) }
   async getAllTopicData() { return data }
-  async getSnapshots(): Promise<LeaderboardSnapshot[]> { return [{ date: '2026-08-24', entries: rankEntries(yesterdayData) }, { date: '2026-08-25', entries: rankEntries(data) }] }
+  async getSnapshots(): Promise<LeaderboardSnapshot[]> {
+    return [
+      { date: '2026-08-24', snapshotAt: '2026-08-24T00:00:00.000Z', scoringMode: 'overallScore', selectedWindow: '30D', entries: rankEntries(yesterdayData) },
+      { date: '2026-08-25', snapshotAt: '2026-08-25T00:00:00.000Z', scoringMode: 'overallScore', selectedWindow: '30D', entries: rankEntries(data) },
+    ]
+  }
 }

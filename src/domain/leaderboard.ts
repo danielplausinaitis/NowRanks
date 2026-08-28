@@ -1,9 +1,18 @@
-import { LEADERBOARD_SIZE } from './config'
+import { LEADERBOARD_SIZE, TIME_WINDOWS } from './config'
 import { scoreTopics } from './scoring'
-import type { LeaderboardEntry, LeaderboardSnapshot, SearchTopicData } from './types'
+import type { LeaderboardEntry, LeaderboardSnapshot, SearchTopicData, TimeWindow } from './types'
 
-export function rankEntries(data: SearchTopicData[], scoreType: 'overallScore' | 'trendingScore' = 'overallScore'): LeaderboardEntry[] {
-  return scoreTopics(data)
+/** Return immutable candidate copies with only the trailing observations for the selected range. */
+export function selectTopicDataForWindow(data: SearchTopicData[], window: TimeWindow): SearchTopicData[] {
+  return data.map((topic) => ({ ...topic, observations: topic.observations.slice(-TIME_WINDOWS[window]) }))
+}
+
+export function rankEntries(
+  data: SearchTopicData[],
+  scoreType: 'overallScore' | 'trendingScore' = 'overallScore',
+  window: TimeWindow = '30D',
+): LeaderboardEntry[] {
+  return scoreTopics(selectTopicDataForWindow(data, window))
     .sort((a, b) => b[scoreType] - a[scoreType] || a.topic.localeCompare(b.topic))
     .slice(0, LEADERBOARD_SIZE)
     .map((entry, index) => ({ ...entry, rank: index + 1, movement: null }))

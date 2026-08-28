@@ -8,7 +8,12 @@ describe('Google Trending Now replay providers', () => {
   it('loads 100 candidate records from the local Trending Now fixture', async () => {
     const records = await new GoogleTrendingNowReplayProvider().getTrendingNow()
     expect(records).toHaveLength(100)
-    expect(records[0]).toMatchObject({ query: 'iPhone 17 Pro release date', normalizedQuery: 'iphone 17 pro release date', source: 'google-trending-now-replay' })
+    expect(records[0]).toMatchObject({
+      query: 'iPhone 17 Pro release date',
+      normalizedQuery: 'iphone 17 pro release date',
+      source: 'google-trending-now-replay',
+      provenance: { providerId: 'google-trending-now', dataMode: 'replay', geographicScope: { kind: 'global' } },
+    })
   })
 
   it('normalizes the captured Google response shape without inventing optional values', () => {
@@ -24,9 +29,32 @@ describe('Google Trending Now replay providers', () => {
   })
 
   it('loads normalized 0–100 historical interest fixture points for a requested range', async () => {
-    const points = await new GoogleHistoricalInterestReplayProvider().getInterest('iphone 17 pro release date', { start: '2026-08-19T00:00:00.000Z', end: '2026-08-25T00:00:00.000Z' })
+    const [candidate] = await new GoogleTrendingNowSearchDataProvider().getCandidates()
+    const points = await new GoogleHistoricalInterestReplayProvider().getInterest({ candidate, range: { start: '2026-08-19T00:00:00.000Z', end: '2026-08-25T00:00:00.000Z' } })
     expect(points).toHaveLength(7)
-    expect(points.every((point) => point.interest >= 0 && point.interest <= 100)).toBe(true)
+    expect(points.every((point) => point.availability === 'available' && point.interest >= 0 && point.interest <= 100)).toBe(true)
+  })
+
+  it('provides a deterministic 1Y replay history while preserving the trailing 30-day fixture window', async () => {
+    const provider = new GoogleTrendingNowSearchDataProvider()
+    const [candidate] = await provider.getAllTopicData()
+    const day = await provider.getObservations(candidate.id, '24H')
+    const week = await provider.getObservations(candidate.id, '7D')
+    const year = await provider.getObservations(candidate.id, '1Y')
+    const thirtyDays = await provider.getObservations(candidate.id, '30D')
+    const originalThirtyDayReplay = Array.from({ length: 30 }, (_, index) => {
+      const baseline = 22
+      const lift = index < 16 ? 0 : index - 15
+      const variation = (index * 3) % 9 - 4
+      return Math.max(0, Math.min(100, baseline + lift + variation))
+    })
+
+    expect(year).toHaveLength(365)
+    expect(thirtyDays).toHaveLength(30)
+    expect(day.map((point) => point.interest)).toEqual(originalThirtyDayReplay.slice(-1))
+    expect(week.map((point) => point.interest)).toEqual(originalThirtyDayReplay.slice(-7))
+    expect(thirtyDays.map((point) => point.interest)).toEqual(originalThirtyDayReplay)
+    expect(year.slice(-30)).toEqual(thirtyDays)
   })
 
   it('conforms to SearchDataProvider and feeds the unchanged scoring engine', async () => {

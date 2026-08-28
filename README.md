@@ -34,6 +34,12 @@ Run the test suite:
 npm test
 ```
 
+## Development scoring diagnostics
+
+While running the Vite development server, append `?scoringDiagnostics=1` to the dashboard URL. The browser developer console will print one row per ranked candidate with every normalized component, configured weight, weighted contribution, and final score. This mode is guarded by Vite's development flag and does not run in production builds.
+
+The current Google inputs are local Trending Now and historical-interest replay fixtures. Diagnostics label them as replay/fixture-derived values; they are not live Google measurements.
+
 ## Project structure
 
 ```text
