@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "db:check": "node --env-file=.env server/scripts/checkDatabaseConnection.mjs",
     "supabase:check": "node --env-file=.env server/scripts/checkSupabaseConnection.mjs",
+    "data:read-check": "node --env-file=.env server/scripts/checkPersistedData.mjs",
     "ingest:replay": "node --env-file=.env server/scripts/ingestReplay.mjs",
     "ingest:replay:recover": "node --env-file=.env server/scripts/recoverStaleReplayIngestion.mjs",
     "test": "vitest run",

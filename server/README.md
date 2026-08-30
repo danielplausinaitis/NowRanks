@@ -47,6 +47,16 @@ Recovery remains protected by `ALLOW_REPLAY_DATABASE_WRITE=true`, reuses the sam
 
 Observations are upserted in bounded batches of 500 records per Data API request. Progress reports completed observations, total observations, and batch count. If Ctrl+C is received, the script waits for the active request to return, then makes a best-effort attempt to mark the claimed ingestion run as failed before exiting.
 
+## Persisted-data read check
+
+The server-only reader pages through persisted candidates, provenance, and observations, reconstructs the canonical topic-data shape, and reads only the selected ranking window. It does not modify Supabase.
+
+```powershell
+npm run data:read-check
+```
+
+This verification reads the explicit `google-trending-now` `replay` dataset and prints that it is not live Google data.
+
 ## Local configuration
 
 1. Copy `.env.example` to an untracked `.env` file.
