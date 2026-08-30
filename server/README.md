@@ -57,6 +57,16 @@ npm run data:read-check
 
 This verification reads the explicit `google-trending-now` `replay` dataset and prints that it is not live Google data.
 
+## Persisted leaderboard check
+
+The application leaderboard service reads canonical persisted data and invokes the existing `src/domain/leaderboard.ts` ranking engine; it does not carry a second scoring formula. This is read-only and development-only until a future HTTP API calls the same service.
+
+```powershell
+npm run leaderboard:check -- 7D
+```
+
+Use `24H`, `7D`, `30D`, or `1Y` as the optional window argument. The check always labels the selected replay dataset as not live Google data.
+
 ## Local configuration
 
 1. Copy `.env.example` to an untracked `.env` file.
