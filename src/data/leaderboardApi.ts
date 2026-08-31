@@ -1,10 +1,11 @@
-import type { Category, TimeWindow } from '../domain/types'
+import type { Category, RankingMode, TimeWindow } from '../domain/types'
 
 export interface LeaderboardApiResponse {
   metadata: {
     providerId: string
     dataMode: 'live' | 'replay' | 'test'
     window: TimeWindow
+    mode: RankingMode
     category: Category | null
     observedFrom: string
     observedThrough: string
@@ -21,8 +22,8 @@ export class LeaderboardApiError extends Error {
 }
 
 /** Browser-only client for the public, read-only leaderboard API. */
-export async function fetchLeaderboard({ window, category, signal }: { window: TimeWindow, category?: Category, signal?: AbortSignal }): Promise<LeaderboardApiResponse> {
-  const params = new URLSearchParams({ window })
+export async function fetchLeaderboard({ window, mode, category, signal }: { window: TimeWindow, mode: RankingMode, category?: Category, signal?: AbortSignal }): Promise<LeaderboardApiResponse> {
+  const params = new URLSearchParams({ window, mode })
   if (category) params.set('category', category)
   const response = await fetch(`/api/leaderboard?${params}`, { signal, headers: { Accept: 'application/json' } })
   if (!response.ok) throw new LeaderboardApiError('The leaderboard service is unavailable. Please try again.', response.status)

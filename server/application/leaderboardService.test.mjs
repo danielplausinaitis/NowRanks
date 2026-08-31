@@ -38,7 +38,7 @@ describe('application leaderboard service', () => {
     const result = await leaderboard.getLeaderboard(request)
     expect(readPersistedTopicData).toHaveBeenCalledWith(request)
     expect(rankingEngine.rankEntries).toHaveBeenCalledWith(expect.any(Array), 'overallScore', '7D')
-    expect(result).toMatchObject({ providerId: 'google-trending-now', dataMode: 'replay', window: '7D', generatedAt: '2026-08-26T00:00:00.000Z' })
+    expect(result).toMatchObject({ providerId: 'google-trending-now', dataMode: 'replay', window: '7D', mode: 'overall', generatedAt: '2026-08-26T00:00:00.000Z' })
     expect(result.entries).toHaveLength(2)
   })
 
@@ -61,6 +61,15 @@ describe('application leaderboard service', () => {
     expect(result.entries.map((entry) => entry.rank)).toEqual([1, 2])
   })
 
+  it('uses the existing trending score type for a selected category cohort', async () => {
+    const rankingEngine = { rankEntries: vi.fn((data, scoreType) => data.map((item, index) => ({ ...item, rank: index + 1, overallScore: 10, trendingScore: 90 - index, movement: null }))) }
+    const { service: leaderboard } = service([candidate('sports-one', 'Sports'), candidate('sports-two', 'Sports'), candidate('other', 'Technology')], rankingEngine)
+    const result = await leaderboard.getLeaderboard({ ...request, category: 'Sports', mode: 'trending' })
+    expect(rankingEngine.rankEntries).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ category: 'Sports' })]), 'trendingScore', '7D')
+    expect(result).toMatchObject({ mode: 'trending', category: 'Sports' })
+    expect(result.entries.map((entry) => entry.rank)).toEqual([1, 2])
+  })
+
   it('rejects an unsupported category instead of treating it as global', async () => {
     const { service: leaderboard, readPersistedTopicData } = service([candidate('one')])
     await expect(leaderboard.getLeaderboard({ ...request, category: 'sports' })).rejects.toThrow(/category must be one of/i)
@@ -72,6 +81,15 @@ describe('application leaderboard service', () => {
     const { service: second } = service([candidate('one'), candidate('two', 'Technology', 365, 200)])
     const input = { ...request, window }
     await expect(first.getLeaderboard(input)).resolves.toEqual(await second.getLeaderboard(input))
+  })
+
+  it('forwards distinct 30D and 1Y windows unchanged to the persisted-data reader and ranker', async () => {
+    const rankingEngine = { rankEntries: vi.fn(() => []) }
+    const { service: leaderboard, readPersistedTopicData } = service([candidate('one')], rankingEngine)
+    await leaderboard.getLeaderboard({ ...request, window: '30D' })
+    await leaderboard.getLeaderboard({ ...request, window: '1Y' })
+    expect(readPersistedTopicData.mock.calls.map(([call]) => call.window)).toEqual(['30D', '1Y'])
+    expect(rankingEngine.rankEntries.mock.calls.map(([, , window]) => window)).toEqual(['30D', '1Y'])
   })
 
   it('preserves replay provenance metadata and never substitutes it for a live request', async () => {
@@ -93,6 +111,7 @@ describe('application leaderboard service', () => {
     const { service: leaderboard, readPersistedTopicData } = service([candidate('one')])
     await expect(leaderboard.getLeaderboard({ ...request, window: '90D' })).rejects.toThrow(/window must be/)
     await expect(leaderboard.getLeaderboard({ ...request, dataMode: 'invalid' })).rejects.toThrow(/dataMode must be/)
+    await expect(leaderboard.getLeaderboard({ ...request, mode: 'banana' })).rejects.toThrow(/mode must be/)
     expect(readPersistedTopicData).not.toHaveBeenCalled()
   })
 })

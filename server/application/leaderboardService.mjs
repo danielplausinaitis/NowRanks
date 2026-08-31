@@ -1,14 +1,17 @@
 import { CATEGORIES } from '../../shared/categories.mjs'
+import { RANKING_MODES, SCORE_TYPE_BY_MODE } from '../../shared/rankingModes.mjs'
 
 const WINDOWS = new Set(['24H', '7D', '30D', '1Y'])
 const DATA_MODES = new Set(['live', 'replay', 'test'])
 const CATEGORY_SET = new Set(CATEGORIES)
+const MODE_SET = new Set(RANKING_MODES)
 
 function assertRequest(request) {
   if (!request || typeof request !== 'object') throw new Error('Leaderboard request is required')
   if (!request.providerId?.trim()) throw new Error('Leaderboard request providerId is required')
   if (!DATA_MODES.has(request.dataMode)) throw new Error('Leaderboard request dataMode must be live, replay, or test')
   if (!WINDOWS.has(request.window)) throw new Error('Leaderboard request window must be 24H, 7D, 30D, or 1Y')
+  if (request.mode !== undefined && !MODE_SET.has(request.mode)) throw new Error(`Leaderboard request mode must be one of: ${RANKING_MODES.join(', ')}`)
   if (request.category !== undefined && !CATEGORY_SET.has(request.category)) throw new Error(`Leaderboard request category must be one of: ${CATEGORIES.join(', ')}`)
 }
 
@@ -24,6 +27,7 @@ export function createLeaderboardService({ readPersistedTopicData, rankingEngine
   return {
     async getLeaderboard(request) {
       assertRequest(request)
+      const mode = request.mode ?? 'overall'
       const persisted = await readPersistedTopicData({
         providerId: request.providerId,
         dataMode: request.dataMode,
@@ -44,11 +48,12 @@ export function createLeaderboardService({ readPersistedTopicData, rankingEngine
         throw new Error(`Insufficient observations for ${request.window}: ${insufficient.length} candidate(s) need ${minimumObservations} observations`)
       }
 
-      const entries = rankingEngine.rankEntries(data, 'overallScore', request.window)
+      const entries = rankingEngine.rankEntries(data, SCORE_TYPE_BY_MODE[mode], request.window)
       return {
         providerId: request.providerId,
         dataMode: request.dataMode,
         window: request.window,
+        mode,
         ...(request.category === undefined ? {} : { category: request.category }),
         observationRange: { startDate: persisted.startDate, endDate: persisted.endDate },
         generatedAt: now(),

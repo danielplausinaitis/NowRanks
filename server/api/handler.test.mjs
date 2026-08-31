@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApiHandler } from './handler.mjs'
 
-function leaderboardResult({ window = '7D', category } = {}) {
+function leaderboardResult({ window = '7D', mode = 'overall', category } = {}) {
   return {
-    providerId: 'google-trending-now', dataMode: 'replay', window, ...(category ? { category } : {}),
+    providerId: 'google-trending-now', dataMode: 'replay', window, mode, ...(category ? { category } : {}),
     observationRange: { startDate: '2026-08-19', endDate: '2026-08-25' }, generatedAt: '2026-08-26T00:00:00.000Z',
     entries: [{ id: 'google:one', rank: 1, topic: 'One', category: category ?? 'Technology', overallScore: 88.5, movement: null }],
   }
@@ -34,9 +34,9 @@ describe('read-only leaderboard HTTP API handler', () => {
     const { handler, leaderboardService } = setup()
     const result = await response(handler, '/api/leaderboard?window=7D')
     expect(result.status).toBe(200)
-    expect(leaderboardService.getLeaderboard).toHaveBeenCalledWith({ providerId: 'google-trending-now', dataMode: 'replay', window: '7D' })
+    expect(leaderboardService.getLeaderboard).toHaveBeenCalledWith({ providerId: 'google-trending-now', dataMode: 'replay', window: '7D', mode: 'overall' })
     expect(result.json).toMatchObject({
-      metadata: { providerId: 'google-trending-now', dataMode: 'replay', window: '7D', category: null },
+      metadata: { providerId: 'google-trending-now', dataMode: 'replay', window: '7D', mode: 'overall', category: null },
       entries: [{ rank: 1, candidateId: 'google:one', score: 88.5 }],
     })
     expect(result.headers['Content-Type']).toContain('application/json')
@@ -46,6 +46,33 @@ describe('read-only leaderboard HTTP API handler', () => {
     const { handler, leaderboardService } = setup()
     await expect(response(handler, `/api/leaderboard?window=${window}`)).resolves.toMatchObject({ status: 200 })
     expect(leaderboardService.getLeaderboard).toHaveBeenCalledWith(expect.objectContaining({ window }))
+  })
+
+  it('keeps 30D and 1Y metadata distinct in API responses', async () => {
+    const leaderboardService = {
+      getLeaderboard: vi.fn(async ({ window, mode }) => ({
+        ...leaderboardResult({ window, mode }),
+        observationRange: window === '30D'
+          ? { startDate: '2026-07-27', endDate: '2026-08-25' }
+          : { startDate: '2025-08-26', endDate: '2026-08-25' },
+        entries: [{ id: `google:${window}`, rank: 1, topic: window, category: 'Technology', overallScore: window === '30D' ? 77.6 : 81.83, trendingScore: 0, movement: null }],
+      })),
+    }
+    const handler = createApiHandler({ leaderboardService, logger: { error: vi.fn() } })
+    const thirtyDay = await response(handler, '/api/leaderboard?window=30D')
+    const year = await response(handler, '/api/leaderboard?window=1Y')
+    expect(thirtyDay.json.metadata).toMatchObject({ window: '30D', observedFrom: '2026-07-27' })
+    expect(year.json.metadata).toMatchObject({ window: '1Y', observedFrom: '2025-08-26' })
+    expect(thirtyDay.json.entries[0].score).toBe(77.6)
+    expect(year.json.entries[0].score).toBe(81.83)
+  })
+
+  it('defaults omitted mode to overall and forwards trending explicitly', async () => {
+    const { handler, leaderboardService } = setup()
+    await response(handler, '/api/leaderboard?window=7D')
+    expect(leaderboardService.getLeaderboard).toHaveBeenLastCalledWith(expect.objectContaining({ mode: 'overall' }))
+    await response(handler, '/api/leaderboard?window=7D&mode=trending&category=Sports')
+    expect(leaderboardService.getLeaderboard).toHaveBeenLastCalledWith(expect.objectContaining({ mode: 'trending', category: 'Sports' }))
   })
 
   it('forwards an exact category filter', async () => {
@@ -68,6 +95,7 @@ describe('read-only leaderboard HTTP API handler', () => {
     await expect(response(handler, '/api/leaderboard?window=banana')).resolves.toMatchObject({ status: 400, json: { error: { code: 'bad_request' } } })
     await expect(response(handler, '/api/leaderboard?debug=true')).resolves.toMatchObject({ status: 400 })
     await expect(response(handler, '/api/leaderboard?category=sports')).resolves.toMatchObject({ status: 400, json: { error: { code: 'bad_request' } } })
+    await expect(response(handler, '/api/leaderboard?mode=banana')).resolves.toMatchObject({ status: 400, json: { error: { code: 'bad_request' } } })
     expect(leaderboardService.getLeaderboard).not.toHaveBeenCalled()
   })
 

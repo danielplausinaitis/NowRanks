@@ -1,7 +1,9 @@
 import { CATEGORIES } from '../../shared/categories.mjs'
+import { RANKING_MODES } from '../../shared/rankingModes.mjs'
 
 const SUPPORTED_WINDOWS = new Set(['24H', '7D', '30D', '1Y'])
 const SUPPORTED_CATEGORIES = new Set(CATEGORIES)
+const SUPPORTED_MODES = new Set(RANKING_MODES)
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' }
 
 function json(status, body, headers = {}) {
@@ -13,7 +15,7 @@ function badRequest(message) {
 }
 
 function validateLeaderboardQuery(searchParams) {
-  const allowed = new Set(['window', 'category'])
+  const allowed = new Set(['window', 'category', 'mode'])
   for (const key of searchParams.keys()) if (!allowed.has(key)) throw new Error(`Unsupported query parameter: ${key}`)
   for (const key of allowed) if (searchParams.getAll(key).length > 1) throw new Error(`Query parameter ${key} may only be supplied once`)
 
@@ -22,7 +24,9 @@ function validateLeaderboardQuery(searchParams) {
   const category = searchParams.get('category')
   if (category !== null && !category.trim()) throw new Error('category must be non-empty when supplied')
   if (category !== null && !SUPPORTED_CATEGORIES.has(category)) throw new Error(`category must be one of: ${CATEGORIES.join(', ')}`)
-  return { window, category }
+  const mode = searchParams.get('mode') ?? 'overall'
+  if (!SUPPORTED_MODES.has(mode)) throw new Error('mode must be one of: overall, trending')
+  return { window, category, mode }
 }
 
 /** Pure HTTP request handler; all ranking work stays in the application service. */
@@ -46,11 +50,12 @@ export function createApiHandler({ leaderboardService, logger = console }) {
       return badRequest(error instanceof Error ? error.message : 'Invalid query parameters')
     }
     try {
-      const { window, category } = query
+      const { window, category, mode } = query
       const leaderboard = await leaderboardService.getLeaderboard({
         providerId: 'google-trending-now',
         dataMode: 'replay',
         window,
+        mode,
         ...(category === null ? {} : { category }),
       })
       return json(200, {
@@ -58,12 +63,13 @@ export function createApiHandler({ leaderboardService, logger = console }) {
           providerId: leaderboard.providerId,
           dataMode: leaderboard.dataMode,
           window: leaderboard.window,
+          mode: leaderboard.mode,
           category: leaderboard.category ?? null,
           observedFrom: leaderboard.observationRange.startDate,
           observedThrough: leaderboard.observationRange.endDate,
           generatedAt: leaderboard.generatedAt,
         },
-        entries: leaderboard.entries.map((entry) => ({ rank: entry.rank, candidateId: entry.id, topic: entry.topic, category: entry.category, score: entry.overallScore })),
+        entries: leaderboard.entries.map((entry) => ({ rank: entry.rank, candidateId: entry.id, topic: entry.topic, category: entry.category, score: entry[leaderboard.mode === 'trending' ? 'trendingScore' : 'overallScore'] })),
       }, { 'Cache-Control': 'private, max-age=60, stale-while-revalidate=300' })
     } catch (error) {
       logger.error?.('NowRanks leaderboard API request failed', error instanceof Error ? error.name : 'Unknown error')

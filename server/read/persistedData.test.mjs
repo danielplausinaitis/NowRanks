@@ -51,6 +51,15 @@ describe('persisted canonical-data reconstruction', () => {
     expect(noLiveRepository.calls[0]).toEqual(['provenance', { providerId: 'google-trending-now', dataMode: 'live' }])
   })
 
+  it('uses distinct 30D and 1Y date ranges from the same latest observation', async () => {
+    const thirtyDayRepository = readRepository()
+    const yearRepository = readRepository()
+    await readPersistedTopicData({ repository: thirtyDayRepository, providerId: 'google-trending-now', dataMode: 'replay', window: '30D' })
+    await readPersistedTopicData({ repository: yearRepository, providerId: 'google-trending-now', dataMode: 'replay', window: '1Y' })
+    expect(thirtyDayRepository.calls[1][1]).toMatchObject({ startDate: '2026-07-27', endDate: '2026-08-25' })
+    expect(yearRepository.calls[1][1]).toMatchObject({ startDate: '2025-08-26', endDate: '2026-08-25' })
+  })
+
   it('fails clearly for malformed persisted observation rows', () => {
     expect(() => reconstructPersistedTopicData({
       candidates: [candidate], provenances: [provenance], observations: [{ ...missing, interest_value: 0 }],

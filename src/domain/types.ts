@@ -1,7 +1,10 @@
 import { CATEGORIES } from '../../shared/categories.mjs'
+import { RANKING_MODES } from '../../shared/rankingModes.mjs'
 
 export { CATEGORIES }
+export { RANKING_MODES }
 export type Category = typeof CATEGORIES[number]
+export type RankingMode = typeof RANKING_MODES[number]
 
 export type TimeWindow = '24H' | '7D' | '30D' | '1Y'
 

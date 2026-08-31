@@ -6,14 +6,14 @@ import type { Category } from '../domain/types'
 
 afterEach(cleanup)
 
-const apiResult = (topic = 'API topic', window: '24H' | '7D' | '30D' | '1Y' = '7D', category: Category = 'Technology') => ({
-  metadata: { providerId: 'google-trending-now', dataMode: 'replay' as const, window, category: null, observedFrom: '2026-08-19', observedThrough: '2026-08-25', generatedAt: '2026-08-26T00:00:00.000Z' },
+const apiResult = (topic = 'API topic', window: '24H' | '7D' | '30D' | '1Y' = '7D', category: Category = 'Technology'): LeaderboardApiResponse => ({
+  metadata: { providerId: 'google-trending-now', dataMode: 'replay', window, mode: 'overall', category: null, observedFrom: '2026-08-19', observedThrough: '2026-08-25', generatedAt: '2026-08-26T00:00:00.000Z' },
   entries: [{ rank: 1, candidateId: `google:${topic}`, topic, category, score: 88.5 }],
 })
 
 describe('App', () => {
   it('renders the global Top 100 dashboard', async () => {
-    render(<App />)
+    render(<App useLeaderboardApi={false} />)
     expect(screen.getByRole('heading', { name: /NowRanks Top 100/i })).toBeInTheDocument()
     expect(await screen.findByText('iPhone 17 Pro release date')).toBeInTheDocument()
     expect(screen.getByText(/Google Trending Now replay data/i)).toBeInTheDocument()
@@ -35,9 +35,9 @@ describe('App', () => {
     render(<App useLeaderboardApi apiClient={apiClient} />)
     expect(screen.getByRole('status')).toHaveTextContent(/Loading persisted leaderboard/i)
     expect(await screen.findByText('API topic')).toBeInTheDocument()
-    expect(apiClient).toHaveBeenCalledWith(expect.objectContaining({ window: '7D' }))
+    expect(apiClient).toHaveBeenCalledWith(expect.objectContaining({ window: '7D', mode: 'overall' }))
     expect(screen.getByText(/REPLAY — NOT LIVE GOOGLE DATA.*Observed through 2026-08-25/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Trending/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Trending/i })).not.toBeDisabled()
   })
 
   it('forwards selected windows and category in API mode', async () => {
@@ -46,7 +46,7 @@ describe('App', () => {
     await screen.findByText('7D-All')
     fireEvent.click(screen.getByRole('button', { name: '30D' }))
     await screen.findByText('30D-All')
-    expect(apiClient).toHaveBeenLastCalledWith(expect.objectContaining({ window: '30D' }))
+    expect(apiClient).toHaveBeenLastCalledWith(expect.objectContaining({ window: '30D', mode: 'overall' }))
   })
 
   it('forwards a selected category to the API instead of filtering an old response locally', async () => {
@@ -104,5 +104,37 @@ describe('App', () => {
     expect(await screen.findByText('New 30D topic')).toBeInTheDocument()
     resolveSevenDay?.(apiResult('Old 7D topic', '7D'))
     await waitFor(() => expect(screen.queryByText('Old 7D topic')).not.toBeInTheDocument())
+  })
+
+  it('replaces a 30D response with the distinct 1Y response', async () => {
+    const apiClientMock = vi.fn(async ({ window, mode }: { window: '24H' | '7D' | '30D' | '1Y', mode: 'overall' | 'trending' }) => {
+      const result = apiResult(window === '30D' ? '30D best savings account' : '1Y interest rate decision', window)
+      result.metadata.mode = mode
+      result.metadata.observedFrom = window === '30D' ? '2026-07-27' : '2025-08-26'
+      result.entries[0].score = window === '30D' ? 77.6 : 81.82
+      return result
+    })
+    const apiClient = apiClientMock as typeof import('../data/leaderboardApi').fetchLeaderboard
+    render(<App useLeaderboardApi apiClient={apiClient} />)
+    fireEvent.click(screen.getByRole('button', { name: '30D' }))
+    expect(await screen.findByText('30D best savings account')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '1Y' }))
+    expect(await screen.findByText('1Y interest rate decision')).toBeInTheDocument()
+    expect(screen.queryByText('30D best savings account')).not.toBeInTheDocument()
+    expect(apiClientMock.mock.calls.map(([request]) => request.window)).toContain('30D')
+    expect(apiClientMock.mock.calls.map(([request]) => request.window)).toContain('1Y')
+  })
+
+  it('requests and renders trending mode without recalculating the API score', async () => {
+    const trendingResponse = apiResult('Trending API topic')
+    trendingResponse.metadata.mode = 'trending'
+    trendingResponse.entries[0].score = 63.2
+    const apiClient = vi.fn(async ({ mode }) => mode === 'trending' ? trendingResponse : apiResult())
+    render(<App useLeaderboardApi apiClient={apiClient} />)
+    await screen.findByText('API topic')
+    fireEvent.click(screen.getByRole('button', { name: /Trending/i }))
+    expect(await screen.findByText('Trending API topic')).toBeInTheDocument()
+    expect(apiClient).toHaveBeenLastCalledWith(expect.objectContaining({ mode: 'trending' }))
+    expect(screen.getByText('63.2')).toBeInTheDocument()
   })
 })
