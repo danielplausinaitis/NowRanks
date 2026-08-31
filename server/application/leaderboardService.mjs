@@ -5,6 +5,7 @@ const WINDOWS = new Set(['24H', '7D', '30D', '1Y'])
 const DATA_MODES = new Set(['live', 'replay', 'test'])
 const CATEGORY_SET = new Set(CATEGORIES)
 const MODE_SET = new Set(RANKING_MODES)
+const WINDOW_DAYS = Object.freeze({ '24H': 1, '7D': 7, '30D': 30, '1Y': 365 })
 
 function assertRequest(request) {
   if (!request || typeof request !== 'object') throw new Error('Leaderboard request is required')
@@ -32,6 +33,7 @@ export function createLeaderboardService({ readPersistedTopicData, rankingEngine
         providerId: request.providerId,
         dataMode: request.dataMode,
         window: request.window,
+        includePrevious: true,
       })
       if (persisted.data.length === 0) {
         throw new Error(`No persisted data is available for provider ${request.providerId} in ${request.dataMode} mode`)
@@ -42,13 +44,30 @@ export function createLeaderboardService({ readPersistedTopicData, rankingEngine
         : persisted.data.filter((candidate) => candidate.category === request.category)
       if (data.length === 0) throw new Error(`No persisted candidates are available for category ${request.category}`)
 
-      const minimumObservations = { '24H': 1, '7D': 7, '30D': 30, '1Y': 365 }[request.window]
+      const minimumObservations = WINDOW_DAYS[request.window]
       const insufficient = data.filter((candidate) => candidate.observations.length < minimumObservations)
       if (insufficient.length > 0) {
         throw new Error(`Insufficient observations for ${request.window}: ${insufficient.length} candidate(s) need ${minimumObservations} observations`)
       }
 
       const entries = rankingEngine.rankEntries(data, SCORE_TYPE_BY_MODE[mode], request.window)
+      const comparisonData = persisted.comparisonEndDate
+        ? data.map((candidate) => ({ ...candidate, observations: candidate.observations.filter((observation) => observation.date <= persisted.comparisonEndDate) }))
+        : []
+      const comparisonAvailable = Boolean(persisted.comparisonEndDate)
+        && comparisonData.every((candidate) => candidate.observations.length >= minimumObservations)
+      const previousRanks = comparisonAvailable
+        ? new Map(rankingEngine.rankEntries(comparisonData, SCORE_TYPE_BY_MODE[mode], request.window).map((entry) => [entry.id, entry.rank]))
+        : new Map()
+      const entriesWithMovement = entries.map((entry) => {
+        if (!comparisonAvailable) return { ...entry, movement: { status: 'unavailable', delta: null, previousRank: null } }
+        const previousRank = previousRanks.get(entry.id)
+        if (previousRank === undefined) return { ...entry, movement: { status: 'new', delta: null, previousRank: null } }
+        const delta = previousRank - entry.rank
+        return { ...entry, movement: delta === 0
+          ? { status: 'unchanged', delta: 0, previousRank }
+          : { status: 'moved', delta, previousRank } }
+      })
       return {
         providerId: request.providerId,
         dataMode: request.dataMode,
@@ -56,8 +75,9 @@ export function createLeaderboardService({ readPersistedTopicData, rankingEngine
         mode,
         ...(request.category === undefined ? {} : { category: request.category }),
         observationRange: { startDate: persisted.startDate, endDate: persisted.endDate },
+        comparison: { available: comparisonAvailable, observedThrough: comparisonAvailable ? persisted.comparisonEndDate : null },
         generatedAt: now(),
-        entries,
+        entries: entriesWithMovement,
       }
     },
   }

@@ -4,20 +4,26 @@ import { reportScoringDiagnostics } from '../domain/scoring'
 import type { Category, LeaderboardEntry, RankingMode, TimeWindow } from '../domain/types'
 import { CATEGORIES } from '../domain/types'
 import { GoogleTrendingNowSearchDataProvider } from '../data/googleTrendingNowProvider'
-import { fetchLeaderboard, type LeaderboardApiResponse } from '../data/leaderboardApi'
+import { fetchLeaderboard, type ApiRankMovement, type LeaderboardApiResponse } from '../data/leaderboardApi'
 
 const provider = new GoogleTrendingNowSearchDataProvider()
 const windows: TimeWindow[] = ['24H', '7D', '30D', '1Y']
 const replayDiagnosticsSource = 'Google Trending Now replay fixture'
 
-type DashboardEntry = Pick<LeaderboardEntry, 'id' | 'topic' | 'category' | 'rank' | 'movement'> & { score: number }
+type DashboardEntry = Pick<LeaderboardEntry, 'id' | 'topic' | 'category' | 'rank'> & { movement: LeaderboardEntry['movement'] | ApiRankMovement, score: number }
 type LeaderboardLoader = typeof fetchLeaderboard
 
 function scoringDiagnosticsEnabled() {
   return import.meta.env.DEV && typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('scoringDiagnostics') === '1'
 }
 
-function movementLabel(movement: LeaderboardEntry['movement']) {
+function movementLabel(movement: DashboardEntry['movement']) {
+  if (movement !== null && typeof movement === 'object') {
+    if (movement.status === 'new') return <span className="movement movement--new">NEW</span>
+    if (movement.status === 'unavailable') return <span className="movement movement--flat">N/A</span>
+    if (movement.status === 'unchanged') return <span className="movement movement--flat">—</span>
+    return movement.delta > 0 ? <span className="movement movement--up">↑ {movement.delta}</span> : <span className="movement movement--down">↓ {Math.abs(movement.delta)}</span>
+  }
   if (movement === 'NEW') return <span className="movement movement--new">NEW</span>
   if (movement === null || movement === 0) return <span className="movement movement--flat">—</span>
   return movement > 0 ? <span className="movement movement--up">↑ {movement}</span> : <span className="movement movement--down">↓ {Math.abs(movement)}</span>
@@ -55,7 +61,7 @@ export function App({ useLeaderboardApi = import.meta.env.VITE_USE_LEADERBOARD_A
       .then((result) => {
         if (version !== requestVersion.current) return
         setApiMetadata(result.metadata)
-        setEntries(result.entries.map((entry) => ({ id: entry.candidateId, topic: entry.topic, category: entry.category, rank: entry.rank, movement: null, score: entry.score })))
+        setEntries(result.entries.map((entry) => ({ id: entry.candidateId, topic: entry.topic, category: entry.category, rank: entry.rank, movement: entry.movement, score: entry.score })))
         setApiState('success')
       })
       .catch((error: unknown) => {

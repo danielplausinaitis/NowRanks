@@ -67,9 +67,11 @@ export function createApiHandler({ leaderboardService, logger = console }) {
           category: leaderboard.category ?? null,
           observedFrom: leaderboard.observationRange.startDate,
           observedThrough: leaderboard.observationRange.endDate,
+          comparisonAvailable: leaderboard.comparison.available,
+          comparisonObservedThrough: leaderboard.comparison.observedThrough,
           generatedAt: leaderboard.generatedAt,
         },
-        entries: leaderboard.entries.map((entry) => ({ rank: entry.rank, candidateId: entry.id, topic: entry.topic, category: entry.category, score: entry[leaderboard.mode === 'trending' ? 'trendingScore' : 'overallScore'] })),
+        entries: leaderboard.entries.map((entry) => ({ rank: entry.rank, candidateId: entry.id, topic: entry.topic, category: entry.category, score: entry[leaderboard.mode === 'trending' ? 'trendingScore' : 'overallScore'], movement: entry.movement })),
       }, { 'Cache-Control': 'private, max-age=60, stale-while-revalidate=300' })
     } catch (error) {
       logger.error?.('NowRanks leaderboard API request failed', error instanceof Error ? error.name : 'Unknown error')

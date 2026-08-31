@@ -5,7 +5,8 @@ function leaderboardResult({ window = '7D', mode = 'overall', category } = {}) {
   return {
     providerId: 'google-trending-now', dataMode: 'replay', window, mode, ...(category ? { category } : {}),
     observationRange: { startDate: '2026-08-19', endDate: '2026-08-25' }, generatedAt: '2026-08-26T00:00:00.000Z',
-    entries: [{ id: 'google:one', rank: 1, topic: 'One', category: category ?? 'Technology', overallScore: 88.5, movement: null }],
+    comparison: { available: true, observedThrough: '2026-08-24' },
+    entries: [{ id: 'google:one', rank: 1, topic: 'One', category: category ?? 'Technology', overallScore: 88.5, movement: { status: 'unchanged', delta: 0, previousRank: 1 } }],
   }
 }
 
@@ -36,8 +37,8 @@ describe('read-only leaderboard HTTP API handler', () => {
     expect(result.status).toBe(200)
     expect(leaderboardService.getLeaderboard).toHaveBeenCalledWith({ providerId: 'google-trending-now', dataMode: 'replay', window: '7D', mode: 'overall' })
     expect(result.json).toMatchObject({
-      metadata: { providerId: 'google-trending-now', dataMode: 'replay', window: '7D', mode: 'overall', category: null },
-      entries: [{ rank: 1, candidateId: 'google:one', score: 88.5 }],
+      metadata: { providerId: 'google-trending-now', dataMode: 'replay', window: '7D', mode: 'overall', category: null, comparisonAvailable: true, comparisonObservedThrough: '2026-08-24' },
+      entries: [{ rank: 1, candidateId: 'google:one', score: 88.5, movement: { status: 'unchanged', delta: 0, previousRank: 1 } }],
     })
     expect(result.headers['Content-Type']).toContain('application/json')
   })
@@ -55,7 +56,7 @@ describe('read-only leaderboard HTTP API handler', () => {
         observationRange: window === '30D'
           ? { startDate: '2026-07-27', endDate: '2026-08-25' }
           : { startDate: '2025-08-26', endDate: '2026-08-25' },
-        entries: [{ id: `google:${window}`, rank: 1, topic: window, category: 'Technology', overallScore: window === '30D' ? 77.6 : 81.83, trendingScore: 0, movement: null }],
+        entries: [{ id: `google:${window}`, rank: 1, topic: window, category: 'Technology', overallScore: window === '30D' ? 77.6 : 81.83, trendingScore: 0, movement: { status: 'unchanged', delta: 0, previousRank: 1 } }],
       })),
     }
     const handler = createApiHandler({ leaderboardService, logger: { error: vi.fn() } })

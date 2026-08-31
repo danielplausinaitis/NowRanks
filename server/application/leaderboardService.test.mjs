@@ -36,7 +36,7 @@ describe('application leaderboard service', () => {
     const rankingEngine = { rankEntries: vi.fn((data) => data.map((item, index) => ({ ...item, rank: index + 1, overallScore: 100 - index, movement: null }))) }
     const { service: leaderboard, readPersistedTopicData } = service([candidate('first'), candidate('second')], rankingEngine)
     const result = await leaderboard.getLeaderboard(request)
-    expect(readPersistedTopicData).toHaveBeenCalledWith(request)
+    expect(readPersistedTopicData).toHaveBeenCalledWith({ ...request, includePrevious: true })
     expect(rankingEngine.rankEntries).toHaveBeenCalledWith(expect.any(Array), 'overallScore', '7D')
     expect(result).toMatchObject({ providerId: 'google-trending-now', dataMode: 'replay', window: '7D', mode: 'overall', generatedAt: '2026-08-26T00:00:00.000Z' })
     expect(result.entries).toHaveLength(2)
@@ -92,12 +92,54 @@ describe('application leaderboard service', () => {
     expect(rankingEngine.rankEntries.mock.calls.map(([, , window]) => window)).toEqual(['30D', '1Y'])
   })
 
+  it('calculates moved, unchanged, and new ranks from the matching previous leaderboard', async () => {
+    const data = ['up', 'down', 'flat', 'new'].map((id) => candidate(id, 'Sports', 8))
+    const readPersistedTopicData = vi.fn(async () => ({ data, startDate: '2026-08-19', endDate: '2026-08-25', comparisonEndDate: '2026-08-24' }))
+    const rankingEngine = { rankEntries: vi.fn()
+      .mockReturnValueOnce([
+        { ...data[0], id: 'up', rank: 4 }, { ...data[1], id: 'down', rank: 8 }, { ...data[2], id: 'flat', rank: 7 }, { ...data[3], id: 'new', rank: 9 },
+      ])
+      .mockReturnValueOnce([
+        { ...data[0], id: 'up', rank: 10 }, { ...data[1], id: 'down', rank: 3 }, { ...data[2], id: 'flat', rank: 7 },
+      ]) }
+    const leaderboard = createLeaderboardService({ readPersistedTopicData, rankingEngine, now: () => '2026-08-26T00:00:00.000Z' })
+    const result = await leaderboard.getLeaderboard({ ...request, category: 'Sports' })
+    expect(result.comparison).toEqual({ available: true, observedThrough: '2026-08-24' })
+    expect(result.entries.map(({ id, movement }) => [id, movement])).toEqual([
+      ['up', { status: 'moved', delta: 6, previousRank: 10 }],
+      ['down', { status: 'moved', delta: -5, previousRank: 3 }],
+      ['flat', { status: 'unchanged', delta: 0, previousRank: 7 }],
+      ['new', { status: 'new', delta: null, previousRank: null }],
+    ])
+  })
+
+  it('reports unavailable movement rather than fabricating a 1Y comparison with only 365 days', async () => {
+    const { service: leaderboard } = service([candidate('one', 'Technology', 365)])
+    const result = await leaderboard.getLeaderboard({ ...request, window: '1Y' })
+    expect(result.comparison).toEqual({ available: false, observedThrough: null })
+    expect(result.entries[0].movement).toEqual({ status: 'unavailable', delta: null, previousRank: null })
+  })
+
+  it('uses the requested trending mode and category cohort for both current and previous rankings', async () => {
+    const data = [candidate('sports', 'Sports', 8), candidate('finance', 'Finance', 8)]
+    const rankingEngine = { rankEntries: vi.fn((items, scoreType) => items.map((item, index) => ({ ...item, rank: index + 1, overallScore: 10, trendingScore: 90 - index }))) }
+    const readPersistedTopicData = vi.fn(async () => ({ data, startDate: '2026-08-19', endDate: '2026-08-25', comparisonEndDate: '2026-08-24' }))
+    const leaderboard = createLeaderboardService({ readPersistedTopicData, rankingEngine })
+    await leaderboard.getLeaderboard({ ...request, category: 'Sports', mode: 'trending' })
+    expect(rankingEngine.rankEntries).toHaveBeenCalledTimes(2)
+    for (const [items, scoreType, window] of rankingEngine.rankEntries.mock.calls) {
+      expect(items.map((item) => item.category)).toEqual(['Sports'])
+      expect(scoreType).toBe('trendingScore')
+      expect(window).toBe('7D')
+    }
+  })
+
   it('preserves replay provenance metadata and never substitutes it for a live request', async () => {
     const { service: replayService } = service([candidate('one')])
     await expect(replayService.getLeaderboard(request)).resolves.toMatchObject({ dataMode: 'replay', observationRange: { startDate: '2025-08-26' } })
     const { service: liveService, readPersistedTopicData } = service([])
     await expect(liveService.getLeaderboard({ ...request, dataMode: 'live' })).rejects.toThrow(/No persisted data.*live mode/)
-    expect(readPersistedTopicData).toHaveBeenCalledWith({ ...request, dataMode: 'live' })
+    expect(readPersistedTopicData).toHaveBeenCalledWith({ ...request, dataMode: 'live', includePrevious: true })
   })
 
   it('reports no candidates and insufficient window data clearly', async () => {

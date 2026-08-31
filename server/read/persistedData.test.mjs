@@ -60,6 +60,13 @@ describe('persisted canonical-data reconstruction', () => {
     expect(yearRepository.calls[1][1]).toMatchObject({ startDate: '2025-08-26', endDate: '2026-08-25' })
   })
 
+  it('reads one bounded overlapping range when a previous comparable window is requested', async () => {
+    const repository = readRepository()
+    const result = await readPersistedTopicData({ repository, providerId: 'google-trending-now', dataMode: 'replay', window: '7D', includePrevious: true })
+    expect(repository.calls[1]).toEqual(['observations', { provenanceIds: ['provenance-1'], startDate: '2026-08-18', endDate: '2026-08-25' }])
+    expect(result).toMatchObject({ startDate: '2026-08-19', comparisonEndDate: '2026-08-24', readStartDate: '2026-08-18' })
+  })
+
   it('fails clearly for malformed persisted observation rows', () => {
     expect(() => reconstructPersistedTopicData({
       candidates: [candidate], provenances: [provenance], observations: [{ ...missing, interest_value: 0 }],

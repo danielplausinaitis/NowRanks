@@ -1,5 +1,11 @@
 import type { Category, RankingMode, TimeWindow } from '../domain/types'
 
+export type ApiRankMovement =
+  | { status: 'moved', delta: number, previousRank: number }
+  | { status: 'unchanged', delta: 0, previousRank: number }
+  | { status: 'new', delta: null, previousRank: null }
+  | { status: 'unavailable', delta: null, previousRank: null }
+
 export interface LeaderboardApiResponse {
   metadata: {
     providerId: string
@@ -9,9 +15,11 @@ export interface LeaderboardApiResponse {
     category: Category | null
     observedFrom: string
     observedThrough: string
+    comparisonAvailable: boolean
+    comparisonObservedThrough: string | null
     generatedAt: string
   }
-  entries: Array<{ rank: number, candidateId: string, topic: string, category: Category, score: number }>
+  entries: Array<{ rank: number, candidateId: string, topic: string, category: Category, score: number, movement: ApiRankMovement }>
 }
 
 export class LeaderboardApiError extends Error {

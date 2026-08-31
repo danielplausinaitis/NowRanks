@@ -78,8 +78,14 @@ function startDateForWindow(endDate, window) {
   return formatDate(end)
 }
 
+function previousDate(date) {
+  const result = new Date(`${date}T00:00:00.000Z`)
+  result.setUTCDate(result.getUTCDate() - 1)
+  return formatDate(result)
+}
+
 /** Reads only the selected ranking window and returns canonical SearchTopicData. */
-export async function readPersistedTopicData({ repository, providerId, dataMode, window = '1Y', endDate }) {
+export async function readPersistedTopicData({ repository, providerId, dataMode, window = '1Y', endDate, includePrevious = false }) {
   if (!repository || !providerId || !dataMode) throw new Error('Repository, providerId, and dataMode are required')
   const provenances = await repository.listProvenance({ providerId, dataMode })
   if (provenances.length === 0) return { data: [], startDate: null, endDate: null, provenanceCount: 0, observationCount: 0 }
@@ -87,12 +93,17 @@ export async function readPersistedTopicData({ repository, providerId, dataMode,
   const effectiveEndDate = endDate ?? await repository.getLatestObservationDate({ provenanceIds })
   if (!effectiveEndDate) return { data: [], startDate: null, endDate: null, provenanceCount: provenances.length, observationCount: 0 }
   const startDate = startDateForWindow(effectiveEndDate, window)
-  const observations = await repository.listObservations({ provenanceIds, startDate, endDate: effectiveEndDate })
+  const comparisonEndDate = includePrevious ? previousDate(effectiveEndDate) : null
+  // Current and previous windows overlap by all but one daily observation. Read their
+  // combined bounded range once, then let the application service derive each cohort.
+  const readStartDate = comparisonEndDate ? startDateForWindow(comparisonEndDate, window) : startDate
+  const observations = await repository.listObservations({ provenanceIds, startDate: readStartDate, endDate: effectiveEndDate })
   const candidates = await repository.listCandidates({ candidateIds: [...new Set(observations.map((row) => row.candidate_id))] })
   return {
     data: reconstructPersistedTopicData({ candidates, provenances, observations }),
     startDate,
     endDate: effectiveEndDate,
+    ...(comparisonEndDate ? { comparisonEndDate, readStartDate } : {}),
     provenanceCount: provenances.length,
     observationCount: observations.length,
   }

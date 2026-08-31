@@ -7,8 +7,8 @@ import type { Category } from '../domain/types'
 afterEach(cleanup)
 
 const apiResult = (topic = 'API topic', window: '24H' | '7D' | '30D' | '1Y' = '7D', category: Category = 'Technology'): LeaderboardApiResponse => ({
-  metadata: { providerId: 'google-trending-now', dataMode: 'replay', window, mode: 'overall', category: null, observedFrom: '2026-08-19', observedThrough: '2026-08-25', generatedAt: '2026-08-26T00:00:00.000Z' },
-  entries: [{ rank: 1, candidateId: `google:${topic}`, topic, category, score: 88.5 }],
+  metadata: { providerId: 'google-trending-now', dataMode: 'replay', window, mode: 'overall', category: null, observedFrom: '2026-08-19', observedThrough: '2026-08-25', comparisonAvailable: true, comparisonObservedThrough: '2026-08-24', generatedAt: '2026-08-26T00:00:00.000Z' },
+  entries: [{ rank: 1, candidateId: `google:${topic}`, topic, category, score: 88.5, movement: { status: 'unchanged', delta: 0, previousRank: 1 } }],
 })
 
 describe('App', () => {
@@ -51,7 +51,7 @@ describe('App', () => {
 
   it('forwards a selected category to the API instead of filtering an old response locally', async () => {
     const initial = apiResult('Technology topic')
-    initial.entries.push({ rank: 2, candidateId: 'google:finance', topic: 'Finance topic', category: 'Finance', score: 80 })
+    initial.entries.push({ rank: 2, candidateId: 'google:finance', topic: 'Finance topic', category: 'Finance', score: 80, movement: { status: 'unchanged', delta: 0, previousRank: 2 } })
     const apiClient: typeof import('../data/leaderboardApi').fetchLeaderboard = vi.fn(async ({ category }) => category ? apiResult('Filtered finance topic', '7D', category === 'Finance' ? category : 'Technology') : initial)
     render(<App useLeaderboardApi apiClient={apiClient} />)
     await screen.findByText('Finance topic')
@@ -62,7 +62,7 @@ describe('App', () => {
 
   it('switches All to Sports to Gaming and back to All through API requests', async () => {
     const initial = apiResult('All topic')
-    initial.entries.push({ rank: 2, candidateId: 'google:sports', topic: 'Sports topic', category: 'Sports', score: 80 }, { rank: 3, candidateId: 'google:gaming', topic: 'Gaming topic', category: 'Gaming', score: 70 })
+    initial.entries.push({ rank: 2, candidateId: 'google:sports', topic: 'Sports topic', category: 'Sports', score: 80, movement: { status: 'unchanged', delta: 0, previousRank: 2 } }, { rank: 3, candidateId: 'google:gaming', topic: 'Gaming topic', category: 'Gaming', score: 70, movement: { status: 'unchanged', delta: 0, previousRank: 3 } })
     const apiClient: typeof import('../data/leaderboardApi').fetchLeaderboard = vi.fn(async ({ category }) => category ? apiResult(`${category} cohort`, '7D', category === 'Gaming' ? 'Finance' : 'Technology') : initial)
     render(<App useLeaderboardApi apiClient={apiClient} />)
     await screen.findByText('All topic')
@@ -136,5 +136,21 @@ describe('App', () => {
     expect(await screen.findByText('Trending API topic')).toBeInTheDocument()
     expect(apiClient).toHaveBeenLastCalledWith(expect.objectContaining({ mode: 'trending' }))
     expect(screen.getByText('63.2')).toBeInTheDocument()
+  })
+
+  it('renders server-provided moved, unchanged, new, and unavailable movement without calculating it locally', async () => {
+    const result = apiResult('Moved topic')
+    result.entries = [
+      { rank: 1, candidateId: 'google:up', topic: 'Moved topic', category: 'Technology', score: 90, movement: { status: 'moved', delta: 6, previousRank: 7 } },
+      { rank: 2, candidateId: 'google:flat', topic: 'Flat topic', category: 'Technology', score: 80, movement: { status: 'unchanged', delta: 0, previousRank: 2 } },
+      { rank: 3, candidateId: 'google:new', topic: 'New topic', category: 'Technology', score: 70, movement: { status: 'new', delta: null, previousRank: null } },
+      { rank: 4, candidateId: 'google:na', topic: 'Unavailable topic', category: 'Technology', score: 60, movement: { status: 'unavailable', delta: null, previousRank: null } },
+    ]
+    render(<App useLeaderboardApi apiClient={vi.fn(async () => result)} />)
+    await screen.findByText('Moved topic')
+    expect(screen.getByText('↑ 6')).toBeInTheDocument()
+    expect(screen.getByText('—')).toBeInTheDocument()
+    expect(screen.getByText('NEW')).toBeInTheDocument()
+    expect(screen.getByText('N/A')).toBeInTheDocument()
   })
 })
