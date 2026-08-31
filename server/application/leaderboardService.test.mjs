@@ -49,6 +49,24 @@ describe('application leaderboard service', () => {
     expect(result.entries.map((entry) => entry.category)).toEqual(['Finance'])
   })
 
+  it.each(['Sports', 'Gaming'])('ranks the %s cohort before assigning ranks', async (category) => {
+    const { service: leaderboard } = service([
+      candidate('global-high', 'Technology', 365, 900),
+      candidate(`${category}-one`, category, 365, 100),
+      candidate(`${category}-two`, category, 365, 200),
+      candidate('other', 'Finance', 365, 500),
+    ])
+    const result = await leaderboard.getLeaderboard({ ...request, category })
+    expect(result.entries.map((entry) => entry.category)).toEqual([category, category])
+    expect(result.entries.map((entry) => entry.rank)).toEqual([1, 2])
+  })
+
+  it('rejects an unsupported category instead of treating it as global', async () => {
+    const { service: leaderboard, readPersistedTopicData } = service([candidate('one')])
+    await expect(leaderboard.getLeaderboard({ ...request, category: 'sports' })).rejects.toThrow(/category must be one of/i)
+    expect(readPersistedTopicData).not.toHaveBeenCalled()
+  })
+
   it.each(['24H', '7D', '30D', '1Y'])('supports the %s ranking window deterministically', async (window) => {
     const { service: first } = service([candidate('one'), candidate('two', 'Technology', 365, 200)])
     const { service: second } = service([candidate('one'), candidate('two', 'Technology', 365, 200)])

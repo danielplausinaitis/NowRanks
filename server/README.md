@@ -67,6 +67,18 @@ npm run leaderboard:check -- 7D
 
 Use `24H`, `7D`, `30D`, or `1Y` as the optional window argument. The check always labels the selected replay dataset as not live Google data.
 
+## Development HTTP API
+
+Start the local, read-only API server:
+
+```powershell
+npm run api:dev
+```
+
+Then request [health](http://127.0.0.1:8787/api/health) or the [7-day replay leaderboard](http://127.0.0.1:8787/api/leaderboard?window=7D). The API permits only `GET`, explicitly fixes its development data source to `google-trending-now` replay data, and exposes no CORS headers. Vite proxies `/api` to this loopback server during development, so a future frontend can use same-origin API calls without broad CORS.
+
+`window` accepts `24H`, `7D`, `30D`, or `1Y`; `category` is optional. Unknown or repeated query parameters are rejected with a JSON `400` response. Leaderboard responses use a short private cache; health and errors are not cached.
+
 ## Local configuration
 
 1. Copy `.env.example` to an untracked `.env` file.

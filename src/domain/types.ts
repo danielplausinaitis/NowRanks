@@ -1,4 +1,7 @@
-export type Category = 'Technology' | 'Gaming' | 'Sports' | 'Travel' | 'Finance' | 'Entertainment' | 'Cars' | 'Business' | 'Health'
+import { CATEGORIES } from '../../shared/categories.mjs'
+
+export { CATEGORIES }
+export type Category = typeof CATEGORIES[number]
 
 export type TimeWindow = '24H' | '7D' | '30D' | '1Y'
 

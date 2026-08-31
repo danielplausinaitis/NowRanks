@@ -10,3 +10,15 @@ export async function withExistingLeaderboardEngine(callback) {
     await vite.close()
   }
 }
+
+/** Keeps the shared TypeScript ranking module available for a development API process. */
+export async function createViteLeaderboardEngine() {
+  const vite = await createServer({ configFile: false, server: { middlewareMode: true }, appType: 'custom' })
+  try {
+    const leaderboard = await vite.ssrLoadModule('/src/domain/leaderboard.ts')
+    return { rankingEngine: { rankEntries: leaderboard.rankEntries }, close: () => vite.close() }
+  } catch (error) {
+    await vite.close()
+    throw error
+  }
+}

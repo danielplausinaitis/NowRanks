@@ -11,6 +11,7 @@
     "supabase:check": "node --env-file=.env server/scripts/checkSupabaseConnection.mjs",
     "data:read-check": "node --env-file=.env server/scripts/checkPersistedData.mjs",
     "leaderboard:check": "node --env-file=.env server/scripts/checkLeaderboard.mjs",
+    "api:dev": "node --env-file=.env server/scripts/startApi.mjs",
     "ingest:replay": "node --env-file=.env server/scripts/ingestReplay.mjs",
     "ingest:replay:recover": "node --env-file=.env server/scripts/recoverStaleReplayIngestion.mjs",
     "test": "vitest run",

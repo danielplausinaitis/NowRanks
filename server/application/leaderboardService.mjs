@@ -1,12 +1,15 @@
+import { CATEGORIES } from '../../shared/categories.mjs'
+
 const WINDOWS = new Set(['24H', '7D', '30D', '1Y'])
 const DATA_MODES = new Set(['live', 'replay', 'test'])
+const CATEGORY_SET = new Set(CATEGORIES)
 
 function assertRequest(request) {
   if (!request || typeof request !== 'object') throw new Error('Leaderboard request is required')
   if (!request.providerId?.trim()) throw new Error('Leaderboard request providerId is required')
   if (!DATA_MODES.has(request.dataMode)) throw new Error('Leaderboard request dataMode must be live, replay, or test')
   if (!WINDOWS.has(request.window)) throw new Error('Leaderboard request window must be 24H, 7D, 30D, or 1Y')
-  if (request.category !== undefined && !request.category.trim()) throw new Error('Leaderboard request category must be non-empty when supplied')
+  if (request.category !== undefined && !CATEGORY_SET.has(request.category)) throw new Error(`Leaderboard request category must be one of: ${CATEGORIES.join(', ')}`)
 }
 
 /**
