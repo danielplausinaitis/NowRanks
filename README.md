@@ -40,6 +40,22 @@ While running the Vite development server, append `?scoringDiagnostics=1` to the
 
 The current Google inputs are local Trending Now and historical-interest replay fixtures. Diagnostics label them as replay/fixture-derived values; they are not live Google measurements.
 
+## Feature-flagged persisted-live UI
+
+Replay remains the default. To inspect the persisted-live UI in Git Bash, start the read-only live API in one terminal:
+
+```bash
+LEADERBOARD_DATA_SOURCE=live npm run api:dev
+```
+
+Then start Vite in a second terminal:
+
+```bash
+VITE_LEADERBOARD_DATA_SOURCE=live VITE_USE_LEADERBOARD_API=true npm run dev
+```
+
+The live UI reads only the API's persisted snapshot: Overall shows Established entries only, while Trending displays separate Established Trending and Emerging lanes. Browsing this path does not trigger ingestion, provider requests, or writes. In PowerShell, set each variable with `$env:NAME = 'value'` before the corresponding command.
+
 ## Project structure
 
 ```text

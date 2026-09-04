@@ -29,9 +29,41 @@ function validateLeaderboardQuery(searchParams) {
   return { window, category, mode }
 }
 
-/** Pure HTTP request handler; all ranking work stays in the application service. */
-export function createApiHandler({ leaderboardService, logger = console }) {
-  if (typeof leaderboardService?.getLeaderboard !== 'function') throw new Error('A leaderboard application service is required')
+function liveEntry(entry) {
+  return {
+    candidateId: entry.candidateId, query: entry.query, title: entry.title, normalizedQuery: entry.normalizedQuery, category: entry.category,
+    scoreLane: entry.scoreLane, laneRank: entry.laneRank, classification: entry.classification, confidence: entry.confidence,
+    confidenceReason: entry.confidenceReason, scoreBasis: entry.scoreBasis, overallScore: entry.overallScore,
+    establishedTrendingScore: entry.establishedTrendingScore, emergingTrendingScore: entry.emergingTrendingScore,
+    historyObservationCount: entry.historyObservationCount, historyAvailableCount: entry.historyAvailableCount,
+    historyCoveragePercentage: entry.historyCoveragePercentage, searchInterest: entry.searchInterest,
+    componentAvailability: entry.componentAvailability, scoredAt: entry.scoredAt, cycleId: entry.cycleId, selectedWindow: entry.selectedWindow,
+  }
+}
+
+function liveResponse({ result, mode, category }) {
+  // Snapshot ranks are persisted for the full cohort. A category filter therefore
+  // narrows each lane but deliberately preserves those ranks rather than fabricating reranks.
+  const withinCategory = (entry) => category === null || entry.category === category
+  const established = result.established.filter(withinCategory)
+  const emerging = mode === 'trending' ? result.emerging.filter(withinCategory) : []
+  return {
+    dataMode: 'live', source: 'persisted-live-snapshot', persisted: true,
+    snapshot: { cycleId: result.snapshot.cycleId, selectedWindow: result.snapshot.selectedWindow, scoredAt: result.snapshot.scoredAt },
+    metadata: {
+      mode, category, establishedCount: established.length, emergingCount: emerging.length,
+      categoryRankSemantics: category === null ? 'persisted-global-lane-rank' : 'persisted-global-lane-rank-not-reranked',
+    },
+    established: established.map(liveEntry),
+    emerging: emerging.map(liveEntry),
+  }
+}
+
+/** Pure HTTP request handler; replay and persisted-live reads are explicit and isolated. */
+export function createApiHandler({ dataSource = 'replay', leaderboardService, liveLeaderboardRead, logger = console }) {
+  if (!['replay', 'live'].includes(dataSource)) throw new Error('Leaderboard data source must be replay or live')
+  if (dataSource === 'replay' && typeof leaderboardService?.getLeaderboard !== 'function') throw new Error('A leaderboard application service is required')
+  if (dataSource === 'live' && typeof liveLeaderboardRead !== 'function') throw new Error('A live leaderboard read service is required')
 
   return async function handleApiRequest({ method, url }) {
     const parsedUrl = new URL(url, 'http://127.0.0.1')
@@ -51,6 +83,10 @@ export function createApiHandler({ leaderboardService, logger = console }) {
     }
     try {
       const { window, category, mode } = query
+      if (dataSource === 'live') {
+        const live = await liveLeaderboardRead({ selectedWindow: window })
+        return json(200, liveResponse({ result: live, mode, category }), { 'Cache-Control': 'private, max-age=60, stale-while-revalidate=300' })
+      }
       const leaderboard = await leaderboardService.getLeaderboard({
         providerId: 'google-trending-now',
         dataMode: 'replay',
@@ -75,6 +111,9 @@ export function createApiHandler({ leaderboardService, logger = console }) {
       }, { 'Cache-Control': 'private, max-age=60, stale-while-revalidate=300' })
     } catch (error) {
       logger.error?.('NowRanks leaderboard API request failed', error instanceof Error ? error.name : 'Unknown error')
+      if (dataSource === 'live' && error?.code === 'live_snapshot_not_found') {
+        return json(404, { error: { code: 'live_snapshot_not_found', message: 'No persisted live snapshot is available for the requested window' } }, { 'Cache-Control': 'no-store' })
+      }
       return json(500, { error: { code: 'internal_error', message: 'Unable to load leaderboard' } }, { 'Cache-Control': 'no-store' })
     }
   }

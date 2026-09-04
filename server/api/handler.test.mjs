@@ -16,6 +16,17 @@ function setup({ reject } = {}) {
   return { handler: createApiHandler({ leaderboardService, logger }), leaderboardService, logger }
 }
 
+function liveResult() {
+  const entry = ({ lane, rank, category = 'Technology' }) => ({
+    candidateId: `${lane}-${rank}`, query: `${lane} topic ${rank}`, title: `${lane} topic ${rank}`, normalizedQuery: `${lane}-${rank}`, category,
+    scoreLane: lane, laneRank: rank, classification: lane === 'established' ? 'established' : 'possible-new-trend', confidence: lane === 'established' ? 'full' : 'emerging', confidenceReason: 'persisted evidence',
+    scoreBasis: lane === 'established' ? 'historical-trending' : 'current-emerging-evidence', overallScore: lane === 'established' ? 80 : null,
+    establishedTrendingScore: lane === 'established' ? 70 : null, emergingTrendingScore: lane === 'emerging' ? 60 : null,
+    historyObservationCount: 365, historyAvailableCount: 365, historyCoveragePercentage: 100, searchInterest: 40, componentAvailability: {}, scoredAt: '2026-09-02T18:00:00.000Z', cycleId: 'cycle-1', selectedWindow: '1Y',
+  })
+  return { snapshot: { cycleId: 'cycle-1', selectedWindow: '1Y', scoredAt: '2026-09-02T18:00:00.000Z' }, established: [entry({ lane: 'established', rank: 1 }), entry({ lane: 'established', rank: 2, category: 'Sports' })], emerging: [entry({ lane: 'emerging', rank: 1 }), entry({ lane: 'emerging', rank: 2, category: 'Sports' })] }
+}
+
 async function response(handler, url, method = 'GET') {
   const result = await handler({ method, url })
   return { ...result, json: JSON.parse(result.body) }
@@ -113,5 +124,54 @@ describe('read-only leaderboard HTTP API handler', () => {
     expect(result).toMatchObject({ status: 500, json: { error: { code: 'internal_error', message: 'Unable to load leaderboard' } } })
     expect(result.body).not.toContain(secret)
     expect(logger.error).toHaveBeenCalledWith('NowRanks leaderboard API request failed', 'Error')
+  })
+
+  it('defaults to the unchanged replay path', async () => {
+    const { handler, leaderboardService } = setup()
+    await response(handler, '/api/leaderboard?window=1Y')
+    expect(leaderboardService.getLeaderboard).toHaveBeenCalledOnce()
+  })
+
+  it('uses only the persisted live reader when explicitly configured live', async () => {
+    const replay = { getLeaderboard: vi.fn() }
+    const liveLeaderboardRead = vi.fn(async () => liveResult())
+    const handler = createApiHandler({ dataSource: 'live', leaderboardService: replay, liveLeaderboardRead, logger: { error: vi.fn() } })
+    const result = await response(handler, '/api/leaderboard?window=1Y&mode=trending')
+    expect(result.status).toBe(200)
+    expect(liveLeaderboardRead).toHaveBeenCalledWith({ selectedWindow: '1Y' })
+    expect(replay.getLeaderboard).not.toHaveBeenCalled()
+    expect(result.json).toMatchObject({
+      dataMode: 'live', source: 'persisted-live-snapshot', persisted: true,
+      snapshot: { cycleId: 'cycle-1', selectedWindow: '1Y' },
+      metadata: { mode: 'trending', establishedCount: 2, emergingCount: 2 },
+      established: expect.arrayContaining([expect.objectContaining({ laneRank: 1, overallScore: 80, emergingTrendingScore: null })]),
+      emerging: expect.arrayContaining([expect.objectContaining({ laneRank: 1, overallScore: null, emergingTrendingScore: 60 })]),
+    })
+    expect(result.body).not.toMatch(/replay|unified.*rank/i)
+  })
+
+  it('makes live Overall Established-only and keeps Emerging scores unavailable', async () => {
+    const handler = createApiHandler({ dataSource: 'live', liveLeaderboardRead: vi.fn(async () => liveResult()), logger: { error: vi.fn() } })
+    const result = await response(handler, '/api/leaderboard?window=1Y&mode=overall')
+    expect(result.json.established).toHaveLength(2)
+    expect(result.json.emerging).toEqual([])
+    expect(result.json.established.every((entry) => entry.overallScore !== null && entry.emergingTrendingScore === null)).toBe(true)
+  })
+
+  it('filters live categories without fabricating lane reranks', async () => {
+    const handler = createApiHandler({ dataSource: 'live', liveLeaderboardRead: vi.fn(async () => liveResult()), logger: { error: vi.fn() } })
+    const result = await response(handler, '/api/leaderboard?window=1Y&mode=trending&category=Sports')
+    expect(result.json.metadata).toMatchObject({ category: 'Sports', categoryRankSemantics: 'persisted-global-lane-rank-not-reranked' })
+    expect(result.json.established.map((entry) => entry.laneRank)).toEqual([2])
+    expect(result.json.emerging.map((entry) => entry.laneRank)).toEqual([2])
+  })
+
+  it('returns an explicit 404 for a missing live snapshot with no replay fallback', async () => {
+    const replay = { getLeaderboard: vi.fn() }
+    const liveLeaderboardRead = vi.fn(async () => { const error = new Error('No live snapshot exists'); error.code = 'live_snapshot_not_found'; throw error })
+    const handler = createApiHandler({ dataSource: 'live', leaderboardService: replay, liveLeaderboardRead, logger: { error: vi.fn() } })
+    const result = await response(handler, '/api/leaderboard?window=1Y')
+    expect(result).toMatchObject({ status: 404, json: { error: { code: 'live_snapshot_not_found' } } })
+    expect(replay.getLeaderboard).not.toHaveBeenCalled()
   })
 })

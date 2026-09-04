@@ -23,9 +23,14 @@ describe('leaderboard API client', () => {
   })
 
   it('adds an optional category and reports a safe API error', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503 })
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: { code: 'unavailable' } }) })
     vi.stubGlobal('fetch', fetchMock)
     await expect(fetchLeaderboard({ window: '7D', mode: 'overall', category: 'Finance' })).rejects.toBeInstanceOf(LeaderboardApiError)
     expect(fetchMock.mock.calls[0][0]).toBe('/api/leaderboard?window=7D&mode=overall&category=Finance')
+  })
+
+  it('surfaces the explicit live no-snapshot error without a replay fallback', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({ error: { code: 'live_snapshot_not_found' } }) }))
+    await expect(fetchLeaderboard({ window: '1Y', mode: 'overall' })).rejects.toMatchObject({ code: 'live_snapshot_not_found', message: 'No live snapshot is available for this window yet.' })
   })
 })

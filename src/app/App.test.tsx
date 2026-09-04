@@ -1,15 +1,25 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
-import type { LeaderboardApiResponse } from '../data/leaderboardApi'
+import type { LeaderboardApiResponse, LiveLeaderboardApiResponse, ReplayLeaderboardApiResponse } from '../data/leaderboardApi'
 import type { Category } from '../domain/types'
 
 afterEach(cleanup)
 
-const apiResult = (topic = 'API topic', window: '24H' | '7D' | '30D' | '1Y' = '7D', category: Category = 'Technology'): LeaderboardApiResponse => ({
+const apiResult = (topic = 'API topic', window: '24H' | '7D' | '30D' | '1Y' = '7D', category: Category = 'Technology'): ReplayLeaderboardApiResponse => ({
   metadata: { providerId: 'google-trending-now', dataMode: 'replay', window, mode: 'overall', category: null, observedFrom: '2026-08-19', observedThrough: '2026-08-25', comparisonAvailable: true, comparisonObservedThrough: '2026-08-24', generatedAt: '2026-08-26T00:00:00.000Z' },
   entries: [{ rank: 1, candidateId: `google:${topic}`, topic, category, score: 88.5, movement: { status: 'unchanged', delta: 0, previousRank: 1 } }],
 })
+
+function liveResult(): LiveLeaderboardApiResponse {
+  const entry = (lane: 'established' | 'emerging', rank: number, category: Category = 'Technology') => ({
+    candidateId: `${lane}-${rank}`, query: `${lane} query ${rank}`, title: `${lane} topic ${rank}`, normalizedQuery: `${lane}-${rank}`, category, scoreLane: lane, laneRank: rank,
+    classification: lane === 'established' ? 'established' as const : 'possible-new-trend' as const, confidence: lane === 'established' ? 'full' as const : 'emerging' as const, confidenceReason: 'persisted evidence', scoreBasis: lane === 'established' ? 'historical-trending' as const : 'current-emerging-evidence' as const,
+    overallScore: lane === 'established' ? 88 : null, establishedTrendingScore: lane === 'established' ? 71 : null, emergingTrendingScore: lane === 'emerging' ? 63 : null,
+    historyObservationCount: 365, historyAvailableCount: 365, historyCoveragePercentage: 100, searchInterest: 42, componentAvailability: {}, scoredAt: '2026-09-02T18:00:00.000Z', cycleId: 'cycle-1', selectedWindow: '1Y' as const,
+  })
+  return { dataMode: 'live', source: 'persisted-live-snapshot', persisted: true, snapshot: { cycleId: 'cycle-1', selectedWindow: '1Y', scoredAt: '2026-09-02T18:00:00.000Z' }, metadata: { mode: 'overall', category: null, establishedCount: 2, emergingCount: 0, categoryRankSemantics: 'persisted-global-lane-rank' }, established: [entry('established', 1), entry('established', 4, 'Sports')], emerging: [entry('emerging', 1), entry('emerging', 3, 'Sports')] }
+}
 
 describe('App', () => {
   it('renders the global Top 100 dashboard', async () => {
@@ -152,5 +162,37 @@ describe('App', () => {
     expect(screen.getByText('—')).toBeInTheDocument()
     expect(screen.getByText('NEW')).toBeInTheDocument()
     expect(screen.getByText('N/A')).toBeInTheDocument()
+  })
+
+  it('renders live Overall as Established-only with snapshot disclosure and no replay disclosure', async () => {
+    const response = liveResult()
+    render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={vi.fn(async () => response)} />)
+    expect(await screen.findByText('established topic 1')).toBeInTheDocument()
+    expect(screen.queryByText('emerging topic 1')).not.toBeInTheDocument()
+    expect(screen.getByText(/Live persisted snapshot.*1Y/i)).toBeInTheDocument()
+    expect(screen.queryByText(/NOT LIVE GOOGLE DATA/i)).not.toBeInTheDocument()
+    expect(screen.getAllByText('N/A')).toHaveLength(2)
+  })
+
+  it('renders live Trending in separate persisted-rank lanes with an Emerging indicator', async () => {
+    const response = liveResult(); response.metadata.mode = 'trending'; response.metadata.emergingCount = 2
+    render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={vi.fn(async ({ mode }) => ({ ...response, metadata: { ...response.metadata, mode } }))} />)
+    await screen.findByText('established topic 1')
+    fireEvent.click(screen.getByRole('button', { name: /Trending/i }))
+    expect(await screen.findByRole('heading', { name: 'Established Trending' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Emerging' })).toBeInTheDocument()
+    expect(screen.getByText('emerging topic 1')).toBeInTheDocument()
+    expect(screen.getAllByText('Emerging').length).toBeGreaterThan(1)
+    expect(screen.getByText(/limited historical evidence/i)).toBeInTheDocument()
+    expect(screen.getByText('#4')).toBeInTheDocument()
+    expect(screen.getByText('#3')).toBeInTheDocument()
+    expect(screen.queryByText(/unified rank/i)).not.toBeInTheDocument()
+  })
+
+  it('shows the live no-snapshot error and never falls back to replay', async () => {
+    const apiClient = vi.fn(async () => { throw new (await import('../data/leaderboardApi')).LeaderboardApiError('missing', 404, 'live_snapshot_not_found') })
+    render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={apiClient} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('No live snapshot is available for this window yet.')
+    expect(screen.queryByText('iPhone 17 Pro release date')).not.toBeInTheDocument()
   })
 })
