@@ -32,7 +32,7 @@ function volume(topic, availability = 'available') {
   }
 }
 
-function history(topic, availability = 'available') {
+function history(topic, availability = 'available', missingReason = 'out-of-range') {
   const normalizedQuery = topic.toLowerCase()
   return {
     id: `dataforseo-trends:${normalizedQuery}`, topic, normalizedQuery, category: 'Technology', retrievedAt: timestamp,
@@ -45,7 +45,7 @@ function history(topic, availability = 'available') {
     observations: [{
       candidateId: `dataforseo-trends:${normalizedQuery}`, date: '2026-08-31', observedAt: '2026-08-31T00:00:00.000Z',
       availability, interest: availability === 'available' ? 0 : null,
-      ...(availability === 'missing' ? { missingReason: 'out-of-range' } : {}),
+      ...(availability === 'missing' ? { missingReason } : {}),
     }],
   }
 }
@@ -111,14 +111,14 @@ const fixedNow = () => timestamp
 
 describe('live ingestion safety configuration', () => {
   it('defaults to dry-run with a bounded candidate count and refuses writes by default', () => {
-    expect(resolveLiveIngestionSafetyConfig({}, fixedNow)).toMatchObject({ dryRun: true, candidateLimit: 10, cycleId: '2026-09-02T12:00Z' })
+    expect(resolveLiveIngestionSafetyConfig({}, fixedNow)).toMatchObject({ dryRun: true, candidateLimit: 50, displayLimit: 10, discoveryLimit: 50, initialPaidCandidates: 15, maxPaidCandidates: 50, cycleId: '2026-09-02T12:00Z' })
     expect(() => assertLiveDatabaseWriteAllowed({})).toThrow(/ALLOW_LIVE_DATABASE_WRITE=true/)
     expect(() => assertLiveDatabaseWriteAllowed({ ALLOW_REPLAY_DATABASE_WRITE: 'true' })).toThrow(/ALLOW_LIVE_DATABASE_WRITE=true/)
   })
 
   it('accepts only the independent exact live gate and conservative candidate range', () => {
     expect(() => assertLiveDatabaseWriteAllowed(writeEnv)).not.toThrow()
-    expect(() => resolveLiveIngestionSafetyConfig({ LIVE_INGEST_DRY_RUN: 'false', LIVE_INGEST_CANDIDATE_LIMIT: '21' }, fixedNow)).toThrow(/between 2 and 20/)
+    expect(resolveLiveIngestionSafetyConfig({ LIVE_INGEST_DRY_RUN: 'false', LIVE_INGEST_CANDIDATE_LIMIT: '21' }, fixedNow)).toMatchObject({ candidateLimit: 21, discoveryLimit: 21, initialPaidCandidates: 21, maxPaidCandidates: 21 })
     expect(resolveLiveIngestionSafetyConfig({ LIVE_INGEST_DRY_RUN: 'false', LIVE_INGEST_CANDIDATE_LIMIT: '2' }, fixedNow)).toMatchObject({ dryRun: false, candidateLimit: 2 })
   })
 })
@@ -151,6 +151,12 @@ describe('live persistence plan', () => {
     expect(plan.observations[0]).toMatchObject({ availability: 'available', interest_value: 0, missing_reason: null })
     expect(JSON.stringify(plan)).not.toContain('must-not-persist')
     expect(plan.evidence.every((row) => row.data_mode === 'live')).toBe(true)
+  })
+
+  it('persists invalid provider measurements as the explicit missing state', () => {
+    const item = candidate('Invalid graph value')
+    const plan = buildLivePersistencePlan({ cycleId: 'invalid-cell', historyWindow: '1Y', scoredAt: timestamp, candidates: [item], volumes: [volume(item.query)], histories: [history(item.query, 'missing', 'invalid-provider-measurement')], scores: [score(item.query, 'insufficient')] })
+    expect(plan.observations[0]).toMatchObject({ availability: 'missing', interest_value: null, missing_reason: 'invalid-provider-measurement' })
   })
 
   it('stores truthful established and emerging snapshot contracts without a unified rank', () => {
@@ -199,6 +205,21 @@ describe('idempotent live writes and recovery', () => {
     expect(repository.stores.observations.size).toBe(3)
     expect(repository.stores.evidence.size).toBe(9)
     expect(repository.stores.entries.size).toBe(2)
+  })
+
+  it('safely retries after a committed observation batch fails later without cleanup', async () => {
+    const repository = mockRepository(); const plan = fixturePlan(); let calls = 0
+    repository.upsertLiveObservations = async (rows) => {
+      calls += 1
+      if (calls === 2) throw new Error('observation constraint failed')
+      rows.forEach((row) => repository.stores.observations.set(row.observation_id, row))
+    }
+    await expect(persistLivePlan({ plan, repository, env: writeEnv, now: fixedNow, observationBatchSize: 1 })).rejects.toThrow(/observation constraint failed/)
+    expect(repository.stores.observations.size).toBe(1)
+    expect(repository.stores.runs.get(plan.runId)).toMatchObject({ status: 'failed', records_accepted: 1 })
+    repository.upsertLiveObservations = async (rows) => rows.forEach((row) => repository.stores.observations.set(row.observation_id, row))
+    await expect(persistLivePlan({ plan, repository, env: writeEnv, now: fixedNow, observationBatchSize: 1 })).resolves.toMatchObject({ status: 'succeeded' })
+    expect(repository.stores.observations.size).toBe(3)
   })
 })
 

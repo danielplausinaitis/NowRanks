@@ -4,10 +4,18 @@ import { DEFAULT_INGESTION_STALE_AFTER_MINUTES, DEFAULT_OBSERVATION_UPSERT_BATCH
 export const ALLOW_LIVE_DATABASE_WRITE_ENV = 'ALLOW_LIVE_DATABASE_WRITE'
 export const LIVE_INGEST_DRY_RUN_ENV = 'LIVE_INGEST_DRY_RUN'
 export const LIVE_INGEST_CANDIDATE_LIMIT_ENV = 'LIVE_INGEST_CANDIDATE_LIMIT'
+export const LIVE_DISPLAY_LIMIT_ENV = 'LIVE_DISPLAY_LIMIT'
+export const LIVE_DISCOVERY_LIMIT_ENV = 'LIVE_DISCOVERY_LIMIT'
+export const LIVE_INITIAL_PAID_CANDIDATES_ENV = 'LIVE_INITIAL_PAID_CANDIDATES'
+export const LIVE_MAX_PAID_CANDIDATES_ENV = 'LIVE_MAX_PAID_CANDIDATES'
 export const LIVE_INGEST_CYCLE_ID_ENV = 'LIVE_INGEST_CYCLE_ID'
 export const LIVE_INGEST_RECOVER_STALE_ENV = 'LIVE_INGEST_RECOVER_STALE'
 export const DEFAULT_LIVE_INGEST_CANDIDATE_LIMIT = 10
-export const LIVE_INGEST_CANDIDATE_LIMIT_RANGE = Object.freeze({ minimum: 2, maximum: 20 })
+export const LIVE_INGEST_CANDIDATE_LIMIT_RANGE = Object.freeze({ minimum: 2, maximum: 100 })
+export const DEFAULT_LIVE_DISPLAY_LIMIT = 10
+export const DEFAULT_LIVE_DISCOVERY_LIMIT = 50
+export const DEFAULT_LIVE_INITIAL_PAID_CANDIDATES = 15
+export const DEFAULT_LIVE_MAX_PAID_CANDIDATES = 50
 
 function booleanValue(value, name, defaultValue) {
   if (value === undefined || value === '') return defaultValue
@@ -23,19 +31,31 @@ function defaultCycleId(now) {
   return date.toISOString().replace(':00.000Z', 'Z')
 }
 
+function boundedInteger(value, name, fallback, range = LIVE_INGEST_CANDIDATE_LIMIT_RANGE) {
+  const number = Number(value === undefined || value === '' ? fallback : value)
+  if (!Number.isInteger(number) || number < range.minimum || number > range.maximum) throw new Error(`${name} must be an integer between ${range.minimum} and ${range.maximum}`)
+  return number
+}
+
 export function resolveLiveIngestionSafetyConfig(env = process.env, now = () => new Date().toISOString()) {
-  const limitValue = env[LIVE_INGEST_CANDIDATE_LIMIT_ENV]
-  const candidateLimit = limitValue === undefined || limitValue === '' ? DEFAULT_LIVE_INGEST_CANDIDATE_LIMIT : Number(limitValue)
-  if (!Number.isInteger(candidateLimit)
-    || candidateLimit < LIVE_INGEST_CANDIDATE_LIMIT_RANGE.minimum
-    || candidateLimit > LIVE_INGEST_CANDIDATE_LIMIT_RANGE.maximum) {
-    throw new Error(`${LIVE_INGEST_CANDIDATE_LIMIT_ENV} must be an integer between 2 and 20`)
-  }
+  const legacyLimit = env[LIVE_INGEST_CANDIDATE_LIMIT_ENV]
+  // The legacy standalone limit remains a fixed-cohort compatibility switch.
+  const displayLimit = boundedInteger(env[LIVE_DISPLAY_LIMIT_ENV], LIVE_DISPLAY_LIMIT_ENV, DEFAULT_LIVE_DISPLAY_LIMIT)
+  const discoveryLimit = boundedInteger(env[LIVE_DISCOVERY_LIMIT_ENV], LIVE_DISCOVERY_LIMIT_ENV, legacyLimit === undefined || legacyLimit === '' ? DEFAULT_LIVE_DISCOVERY_LIMIT : legacyLimit)
+  const initialPaidCandidates = boundedInteger(env[LIVE_INITIAL_PAID_CANDIDATES_ENV], LIVE_INITIAL_PAID_CANDIDATES_ENV, legacyLimit === undefined || legacyLimit === '' ? DEFAULT_LIVE_INITIAL_PAID_CANDIDATES : legacyLimit)
+  const maxPaidCandidates = boundedInteger(env[LIVE_MAX_PAID_CANDIDATES_ENV], LIVE_MAX_PAID_CANDIDATES_ENV, legacyLimit === undefined || legacyLimit === '' ? DEFAULT_LIVE_MAX_PAID_CANDIDATES : legacyLimit)
+  if (initialPaidCandidates > maxPaidCandidates) throw new Error(`${LIVE_INITIAL_PAID_CANDIDATES_ENV} must not exceed ${LIVE_MAX_PAID_CANDIDATES_ENV}`)
+  if (maxPaidCandidates > discoveryLimit) throw new Error(`${LIVE_MAX_PAID_CANDIDATES_ENV} must not exceed ${LIVE_DISCOVERY_LIMIT_ENV}`)
   const cycleId = env[LIVE_INGEST_CYCLE_ID_ENV]?.trim() || defaultCycleId(now())
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(cycleId)) throw new Error(`${LIVE_INGEST_CYCLE_ID_ENV} contains unsupported characters`)
   return {
     dryRun: booleanValue(env[LIVE_INGEST_DRY_RUN_ENV], LIVE_INGEST_DRY_RUN_ENV, true),
-    candidateLimit,
+    // Retained for callers which still expect the old field; it now means maximum paid cohort.
+    candidateLimit: maxPaidCandidates,
+    displayLimit,
+    discoveryLimit,
+    initialPaidCandidates,
+    maxPaidCandidates,
     cycleId,
     recoverStaleRun: booleanValue(env[LIVE_INGEST_RECOVER_STALE_ENV], LIVE_INGEST_RECOVER_STALE_ENV, false),
   }
@@ -75,10 +95,11 @@ function evidenceRow({ runId, candidateId, providerId, kind, observedAt, retriev
   }
 }
 
-function rankScores(scores, scoreKey) {
+function rankScores(scores, scoreKey, limit = Infinity) {
   return scores
     .filter((entry) => Number.isFinite(entry[scoreKey]))
     .sort((left, right) => right[scoreKey] - left[scoreKey] || left.topic.localeCompare(right.topic))
+    .slice(0, limit)
     .map((entry, index) => ({ entry, rank: index + 1 }))
 }
 
@@ -90,7 +111,7 @@ function componentAvailability(entry) {
   }]))
 }
 
-export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, candidates, volumes, histories, scores }) {
+export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, candidates, volumes, histories, scores, displayLimit = DEFAULT_LIVE_DISPLAY_LIMIT }) {
   if (!cycleId || !historyWindow || Number.isNaN(Date.parse(scoredAt))) throw new Error('Live persistence plan requires cycle, window, and scored timestamp')
   if (![candidates, volumes, histories, scores].every(Array.isArray)) throw new Error('Live persistence plan inputs must be arrays')
   const { runId, idempotencyKey } = liveIngestionIdentity({ cycleId, historyWindow })
@@ -159,8 +180,11 @@ export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, can
   }
 
   const snapshotId = stableUuid(`live-snapshot:${cycleId}:${historyWindow}`)
-  const established = rankScores(scores, 'shadowTrendingScore')
-  const emerging = rankScores(scores, 'shadowEmergingTrendingScore')
+  if (!Number.isInteger(displayLimit) || displayLimit < 1) throw new Error('Live persistence displayLimit must be a positive integer')
+  // Scores are never compared across the Established and Emerging lanes. Established retains
+  // its independent order; Emerging fills any remaining display slots in its own order.
+  const established = rankScores(scores, 'shadowTrendingScore', displayLimit)
+  const emerging = rankScores(scores, 'shadowEmergingTrendingScore', Math.max(0, displayLimit - established.length))
   const snapshotEntries = [...established.map(({ entry, rank }) => ({ entry, rank, lane: 'established' })), ...emerging.map(({ entry, rank }) => ({ entry, rank, lane: 'emerging' }))]
     .map(({ entry, rank, lane }) => ({
       snapshot_entry_id: stableUuid(`live-snapshot-entry:${snapshotId}:${entry.normalizedQuery}:${lane}`),
@@ -216,6 +240,8 @@ export function summarizeLiveDryRun(plan, requestMetrics = {}) {
     providerRequests: requestMetrics.providerRequests ?? {},
     providerCosts: requestMetrics.providerCosts ?? {},
     baselineCache: requestMetrics.baselineCache ?? null,
+    graphMeasurements: requestMetrics.graphMeasurements ?? null,
+    evaluation: requestMetrics.evaluation ?? null,
   }
 }
 

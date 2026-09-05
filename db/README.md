@@ -2,6 +2,8 @@
 
 `migrations/001_initial_nowranks_schema.sql` is the initial PostgreSQL schema. It is plain SQL and deliberately does not require an ORM, a database connection, or PostgreSQL extensions. The future backend supplies UUID primary keys and runs migrations.
 
+`migrations/004_observation_missing_measurement_reason.sql` is a forward-only update to `observations_check`. It preserves the available-versus-missing value invariant and adds `invalid-provider-measurement` to the closed missing-reason vocabulary used for malformed individual live-provider cells.
+
 ## Canonical mapping
 
 - `candidates` stores the stable `SearchTopic` identity: ID, display query, normalized query, and category.

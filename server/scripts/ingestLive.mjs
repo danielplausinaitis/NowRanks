@@ -54,6 +54,8 @@ function printSummary(summary) {
   console.log(`Provider-reported cost: Search Volume $${Number(costs.searchVolume).toFixed(4)}; Trends $${Number(costs.trends).toFixed(4)}; total $${Number(costs.total).toFixed(4)}; SerpApi ${costs.serpApi}.`)
   const cache = summary.baselineCache
   if (cache) console.log(`Baseline cache: fresh hits ${cache.freshHits}; stale/missing ${cache.staleOrMissing}; Search Volume keywords requested ${cache.requestedKeywords}; provider requests avoided ${cache.requestsAvoided}; cache rows refreshed ${cache.rowsRefreshed}; cache writes skipped ${cache.writesSkipped}.`)
+  const graph = summary.graphMeasurements
+  if (graph) console.log(`Trends graph diagnostics: invalid/missing measurements skipped ${graph.invalidOrMissingMeasurements}; affected candidates ${graph.affectedCandidates}.`)
 }
 
 function volumeRequest(env) {
@@ -65,7 +67,7 @@ export async function prepareLiveSchedulerShared({ env = process.env, dependenci
   if (!safety.dryRun) assertLiveDatabaseWriteAllowed(env)
   const repository = dependencies.repository ?? createSupabaseIngestionRepository(createServerSupabaseClient(env))
   const discoveryRequest = buildSerpApiDiscoveryRequestFromEnv(env)
-  const sharedInputs = await collectLiveSharedInputs({ candidateLimit: safety.candidateLimit, discoveryRequest, volumeRequest: volumeRequest(env), discoveryClient: dependencies.discoveryClient ?? createSerpApiTrendingNowClient({ env }), volumeClient: dependencies.volumeClient ?? createDataForSeoSearchVolumeClient({ env }), baselineCacheRepository: repository, baselineCacheTtlHours: Number(env.LIVE_BASELINE_TTL_HOURS || 24), writeBaselineCache: !safety.dryRun, onProgress: (stage) => console.log(`NowRanks live scheduler shared stage: ${stage}`) })
+  const sharedInputs = await collectLiveSharedInputs({ discoveryLimit: safety.discoveryLimit, maxPaidCandidates: safety.maxPaidCandidates, discoveryRequest, volumeRequest: volumeRequest(env), discoveryClient: dependencies.discoveryClient ?? createSerpApiTrendingNowClient({ env }), volumeClient: dependencies.volumeClient ?? createDataForSeoSearchVolumeClient({ env }), baselineCacheRepository: repository, baselineCacheTtlHours: Number(env.LIVE_BASELINE_TTL_HOURS || 24), writeBaselineCache: !safety.dryRun, onProgress: (stage) => console.log(`NowRanks live scheduler shared stage: ${stage}`) })
   return { sharedInputs, repository }
 }
 
@@ -76,13 +78,16 @@ export async function runLiveIngestion({ env = process.env, dependencies = {} } 
   const trendsMode = liveTrendsMode(env)
   const repository = dependencies.repository ?? createSupabaseIngestionRepository(createServerSupabaseClient(env))
   const discoveryRequest = buildSerpApiDiscoveryRequestFromEnv(env)
-  const plannedTrendRequests = trendsMode === 'single' ? safety.candidateLimit : Math.ceil(safety.candidateLimit / 5)
+  const plannedTrendRequests = trendsMode === 'single' ? safety.maxPaidCandidates : Math.ceil(safety.maxPaidCandidates / 5)
   console.log('NowRanks live ingestion')
   console.log(safety.dryRun ? 'LIVE EXTERNAL DATA — DRY RUN — NOT PERSISTED' : 'LIVE EXTERNAL DATA — DATABASE WRITE EXPLICITLY ENABLED')
-  console.log(`Planned maximum: ${safety.candidateLimit} candidates; SerpApi 1 request; DataForSEO Search Volume 1 request; DataForSEO Trends up to ${plannedTrendRequests} requests.`)
+  console.log(`Planned maximum: discovery pool ${safety.discoveryLimit}; baseline cohort ${safety.maxPaidCandidates}; initial Trends cohort ${safety.initialPaidCandidates}; display up to ${safety.displayLimit} ranked topics; SerpApi 1 request; DataForSEO Search Volume 1 request; DataForSEO Trends up to ${plannedTrendRequests} requests.`)
 
   const cycle = await collectLiveIngestionCycle({
-    candidateLimit: safety.candidateLimit,
+    discoveryLimit: safety.discoveryLimit,
+    maxPaidCandidates: safety.maxPaidCandidates,
+    initialPaidCandidates: safety.initialPaidCandidates,
+    displayLimit: safety.displayLimit,
     discoveryRequest,
     volumeRequest: volumeRequest(env),
     historyRequest: { ...locationRequest(env), ...shadowHistoryRequestForWindow(historyWindow) },
@@ -98,7 +103,7 @@ export async function runLiveIngestion({ env = process.env, dependencies = {} } 
     sharedInputs: dependencies.sharedInputs,
     onProgress: (stage) => console.log(`NowRanks live ingestion stage: ${stage}`),
   })
-  const plan = buildLivePersistencePlan({ cycleId: safety.cycleId, historyWindow, ...cycle })
+  const plan = buildLivePersistencePlan({ cycleId: safety.cycleId, historyWindow, displayLimit: safety.displayLimit, ...cycle })
   const summary = summarizeLiveDryRun(plan, cycle.requestMetrics)
   const displayedSummary = dependencies.sharedInputs ? { ...summary, providerRequests: { ...summary.providerRequests, serpApi: 0, dataForSeoSearchVolume: 0 }, providerCosts: { ...summary.providerCosts, searchVolume: 0, total: summary.providerCosts.trends }, baselineCache: null } : summary
   printSummary(displayedSummary)

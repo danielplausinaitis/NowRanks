@@ -42,7 +42,9 @@ LIVE_INGEST_DRY_RUN=false
 ALLOW_LIVE_DATABASE_WRITE=true
 ```
 
-`ALLOW_REPLAY_DATABASE_WRITE` has no effect on live writes. `LIVE_INGEST_CANDIDATE_LIMIT` defaults to 10 and must remain between 2 and 20. `LIVE_INGEST_TRENDS_MODE` defaults to `single`; `LIVE_INGEST_HISTORY_WINDOW` defaults to `1Y`.
+`ALLOW_REPLAY_DATABASE_WRITE` has no effect on live writes. The adaptive defaults are `LIVE_DISPLAY_LIMIT=10`, `LIVE_DISCOVERY_LIMIT=50`, `LIVE_INITIAL_PAID_CANDIDATES=15`, and `LIVE_MAX_PAID_CANDIDATES=50` (each bounded at 2–100). Discovery is a cheap SerpApi pool; the maximum paid cohort is the bounded Search Volume/Trends exposure; the display is **up to** 10 truthful ranked topics. The baseline request pre-warms the maximum paid cohort in one bulk task so an expansion does not trigger a second bulk request; Trends expands only if fewer than ten eligible topics are found. `LIVE_INGEST_CANDIDATE_LIMIT` remains a compatibility override that makes discovery, initial paid, and maximum paid cohorts equal. `LIVE_INGEST_TRENDS_MODE` defaults to `single`; `LIVE_INGEST_HISTORY_WINDOW` defaults to `1Y`.
+
+The scheduler preflight always prices the maximum paid cohort (not the initial batch), including four window-specific Trends passes and one cold Search Volume bulk refresh. Runtime diagnostics report the actual Trends candidates and provider-reported cost. Separate Established and Emerging lanes are never score-merged: Established entries occupy their own ordered slots first and Emerging entries use any remaining display slots. An undersupplied source remains an honest “up to 10” result.
 
 ## First manual command
 

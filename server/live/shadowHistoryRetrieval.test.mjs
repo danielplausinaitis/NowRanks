@@ -8,7 +8,7 @@ import {
   resolveShadowTrendsMode,
   retrieveShadowTrendHistories,
 } from './shadowHistoryRetrieval.mjs'
-import { scoreShadowLiveCohort } from './shadowScoring.mjs'
+import { scoreElapsedTimeShadowLiveCohort, scoreShadowLiveCohort } from './shadowScoring.mjs'
 
 const geographicScope = { kind: 'country', countryCode: 'US' }
 const signalEngine = { normalize, growthSignal, momentumSignal, consistencySignal, breakoutSignal }
@@ -124,6 +124,28 @@ describe('shadow history retrieval strategies', () => {
     })
     expect(result.providerCost).toBeCloseTo(0.05)
     expect(providerReportedCost({ cost: 0.03, tasks: [{ cost: 99 }] })).toBe(0.03)
-    expect(Object.keys(result).sort()).toEqual(['histories', 'providerCost', 'requestCount'])
+    expect(result.graphMeasurements).toEqual({ invalidOrMissingMeasurements: 0, affectedCandidates: 0 })
+    expect(Object.keys(result).sort()).toEqual(['graphMeasurements', 'histories', 'providerCost', 'requestCount'])
+  })
+
+  it('aggregates candidate-local invalid graph diagnostics without aborting valid histories', async () => {
+    const client = clientWith((keywords) => responseFor(keywords, ({ keywordIndex, pointIndex }) => keywordIndex === 0 && pointIndex === 3 ? null : pointIndex + 1))
+    const result = await retrieveShadowTrendHistories({ candidates: candidates(2), mode: 'batched', client, geographicScope, adapter: adapter() })
+    expect(result.histories).toHaveLength(2)
+    expect(result.histories[0].observations[3]).toMatchObject({ availability: 'missing', interest: null, missingReason: 'invalid-provider-measurement' })
+    expect(result.histories[1].observations.filter((point) => point.availability === 'available')).toHaveLength(14)
+    expect(result.graphMeasurements).toEqual({ invalidOrMissingMeasurements: 1, affectedCandidates: 1 })
+  })
+
+  it('lets normal elapsed coverage rules make a heavily degraded candidate insufficient', async () => {
+    const input = candidates(2)
+    const client = clientWith((keywords) => responseFor(keywords, ({ keywordIndex, pointIndex }) => keywordIndex === 0 && pointIndex >= 8 ? null : pointIndex + 1))
+    const result = await retrieveShadowTrendHistories({ candidates: input, mode: 'batched', client, geographicScope, adapter: adapter() })
+    const scored = scoreElapsedTimeShadowLiveCohort({
+      historyWindow: '7D', signalEngine, scoreWeights: SCORE_WEIGHTS,
+      candidates: input.map((candidate, index) => ({ topic: candidate.query, normalizedQuery: candidate.normalizedQuery, category: candidate.category, currentTrendIntensity: { searchVolume: 100 + index }, baselineDemand: { availability: 'available', searchVolume: 1_000 + index }, historicalTrendShape: result.histories[index] })),
+    })
+    expect(scored.find((entry) => entry.topic === 'Topic 1')).toMatchObject({ status: 'insufficient-signal', shadowTrendingScore: null })
+    expect(scored.find((entry) => entry.topic === 'Topic 2').status).toBe('scored')
   })
 })

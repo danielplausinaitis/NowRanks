@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createLiveTrendProviderAdapter, LiveProviderError, loadLiveTopicData } from './providerAdapter.mjs'
+import { createLiveTrendProviderAdapter, LIVE_MISSING_REASONS, LiveProviderError, loadLiveTopicData } from './providerAdapter.mjs'
 
 const retrievedAt = '2026-08-26T00:05:00.000Z'
 const payload = () => ({
@@ -31,6 +31,23 @@ describe('live provider adapter boundary', () => {
       expect.objectContaining({ availability: 'available', interest: 0 }),
       expect.objectContaining({ availability: 'missing', interest: null, missingReason: 'not-reported' }),
     ])
+  })
+
+  it.each(LIVE_MISSING_REASONS)('accepts the closed missing-reason vocabulary: %s', (missingReason) => {
+    const value = payload()
+    value.topics[0].observations[1].missingReason = missingReason
+    expect(adapter().normalize(value, { retrievedAt })[0].observations[1]).toMatchObject({ availability: 'missing', interest: null, missingReason })
+  })
+
+  it.each([
+    ['missing with numeric measurement', { measurement: 1, missingReason: 'invalid-provider-measurement' }],
+    ['available with null measurement', { measurement: null }],
+    ['available with a missing reason', { measurement: 1, missingReason: 'out-of-range' }],
+    ['unknown missing reason', { measurement: null, missingReason: 'unknown-reason' }],
+  ])('rejects invalid availability/value combinations: %s', (_label, observation) => {
+    const value = payload()
+    value.topics[0].observations[1] = { observedAt: '2026-08-26T00:00:00.000Z', ...observation }
+    expect(() => adapter().normalize(value, { retrievedAt })).toThrow(/Live provider response/i)
   })
 
   it.each([

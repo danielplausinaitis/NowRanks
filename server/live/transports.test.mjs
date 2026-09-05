@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { assessDataForSeoBatchComparability, assertGlobalDataForSeoComparable } from './comparability.mjs'
-import { buildDataForSeoExploreTask, createDataForSeoTrendsClient, normalizeDataForSeoMeasurement } from './dataForSeoTrends.mjs'
+import { buildDataForSeoExploreTask, createDataForSeoTrendsClient, normalizeDataForSeoMeasurement, normalizeDataForSeoMeasurementWithDiagnostics } from './dataForSeoTrends.mjs'
 import { createLiveTrendProviderAdapter, LiveProviderError } from './providerAdapter.mjs'
 import { buildSerpApiTrendingNowUrl, createSerpApiTrendingNowClient, mapSerpApiCategory, normalizeSerpApiTrendingNow, requireSerpApiApiKey } from './serpApiTrendingNow.mjs'
 
@@ -97,6 +97,31 @@ describe('DataForSEO Trends server transport', () => {
     expect(data[1].observations[0]).toMatchObject({ availability: 'missing', interest: null, missingReason: 'out-of-range' })
     expect(data[0]).toMatchObject({ historyRequest: { timeRange: 'past_12_months', dateFrom: null, dateTo: null }, retrievedAt: '2026-08-26T00:05:00.000Z' })
     expect(data[0].observations[0]).toMatchObject({ providerBucketStart: '2024-08-26', providerBucketEnd: '2024-09-01' })
+  })
+
+  it.each([
+    ['null', null], ['undefined', undefined], ['empty string', ''], ['non-numeric string', 'unknown'], ['numeric string outside the numeric provider contract', '12'], ['negative', -1], ['NaN', Number.NaN], ['Infinity', Infinity],
+  ])('degrades a %s graph cell to explicit missing data without coercing it to zero', (_label, value) => {
+    const response = structuredClone(dataForSeoResponse)
+    response.tasks[0].result[0].items[0].data[0].values[0] = value
+    const result = normalizeDataForSeoMeasurementWithDiagnostics({ response, candidates: [
+      { sourceId: 'serp:space', query: 'Space Launch', normalizedQuery: 'space launch', category: 'Technology' },
+      { sourceId: 'serp:orbit', query: 'Orbit', normalizedQuery: 'orbit', category: 'Technology' },
+    ], geographicScope: geography, retrievedAt: '2026-08-26T00:05:00.000Z', adapter: adapter() })
+    expect(result.histories[0].observations[0]).toMatchObject({ availability: 'missing', interest: null, missingReason: 'invalid-provider-measurement' })
+    expect(result.histories[1].observations[0]).toMatchObject({ availability: 'missing', interest: null, missingReason: 'out-of-range' })
+    expect(result.diagnostics).toEqual({ invalidOrMissingMeasurements: 1, affectedCandidates: 1 })
+  })
+
+  it('keeps valid candidate histories when another candidate has a bad graph cell, while malformed graph rows still fail', () => {
+    const response = structuredClone(dataForSeoResponse)
+    response.tasks[0].result[0].items[0].data[0].values[0] = null
+    const result = normalizeDataForSeoMeasurementWithDiagnostics({ response, candidates: [
+      { query: 'Space Launch', normalizedQuery: 'space launch', category: 'Technology' }, { query: 'Orbit', normalizedQuery: 'orbit', category: 'Technology' },
+    ], geographicScope: geography, retrievedAt: '2026-08-26T00:05:00.000Z', adapter: adapter() })
+    expect(result.histories[1].observations.every((point) => point.availability === 'available' || point.missingReason === 'out-of-range')).toBe(true)
+    const malformed = structuredClone(dataForSeoResponse); malformed.tasks[0].result[0].items[0].data[0].values = [1]
+    expect(() => normalizeDataForSeoMeasurement({ response: malformed, candidates: [{ query: 'Space Launch', normalizedQuery: 'space launch', category: 'Technology' }, { query: 'Orbit', normalizedQuery: 'orbit', category: 'Technology' }], geographicScope: geography, retrievedAt: '2026-08-26T00:05:00.000Z', adapter: adapter() })).toThrow(/values do not match requested keywords/)
   })
 
   it('rejects malformed responses, including valid result envelopes without a trends graph, and sanitizes provider errors', async () => {

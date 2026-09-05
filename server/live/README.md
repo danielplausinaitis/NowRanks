@@ -24,7 +24,7 @@ Set `SERPAPI_API_KEY` and `SERPAPI_DISCOVERY_GEO`; the other `SERPAPI_DISCOVERY_
 
 `dataForSeoTrends.mjs` posts exactly one task to `https://api.dataforseo.com/v3/keywords_data/dataforseo_trends/explore/live`. It reads `DATAFORSEO_LOGIN` and `DATAFORSEO_PASSWORD` only, builds a Basic authorization header only in memory, supports one to five keywords, requires exactly one explicit `location_name` or `location_code`, and supports optional `date_from`/`date_to`, documented `time_range`, and provider `type` parameters. Its normalized measurements preserve retrieval time, requested range, provider timestamps, and provider bucket boundaries when supplied.
 
-The provider documents zero as insufficient data for this graph, so this adapter truthfully emits it as a missing `out-of-range` observation—not as zero interest. Positive numeric values are preserved. Missing or non-comparable data remains unscorable under the existing engine.
+The provider documents zero as insufficient data for this graph, so this adapter truthfully emits it as a missing `out-of-range` observation—not as zero interest. A structurally valid graph cell that is null, absent, non-numeric, negative, or non-finite is likewise recorded as missing `invalid-provider-measurement`, with compact per-run counters; it never aborts unrelated candidate histories or becomes zero. Positive numeric values are preserved. Envelope, keyword alignment, timestamp, row, and values-array shape faults remain fail-fast. Missing or non-comparable data remains unscorable under the existing engine.
 
 ```powershell
 npm run live:measurement-check -- "keyword one" "keyword two"

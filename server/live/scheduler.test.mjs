@@ -18,6 +18,12 @@ describe('live scheduler core', () => {
     expect(schedulePlan({ env: { LIVE_INGEST_CANDIDATE_LIMIT: '10', LIVE_MAX_PROVIDER_COST_USD: '0.12' } }).withinCostCap).toBe(false)
     expect(schedulePlan({ env: { LIVE_INGEST_CANDIDATE_LIMIT: '10', LIVE_MAX_PROVIDER_COST_USD: '0.138' } }).withinCostCap).toBe(true)
   })
+  it('prices the configured maximum paid exposure rather than the initial adaptive batch', () => {
+    const plan = schedulePlan({ env: { LIVE_DISCOVERY_LIMIT: '50', LIVE_INITIAL_PAID_CANDIDATES: '15', LIVE_MAX_PAID_CANDIDATES: '50', LIVE_MAX_PROVIDER_COST_USD: '0.33' } })
+    expect(plan.config).toMatchObject({ displayLimit: 10, discoveryLimit: 50, initialPaidCandidates: 15, maxPaidCandidates: 50 })
+    expect(plan.estimates).toMatchObject({ trendsRequests: 200, coldCycleCostUsd: 0.33 })
+    expect(plan.withinCostCap).toBe(true)
+  })
   it('cannot bypass the existing live write gate or cost cap', async () => { const prepare = vi.fn(); const run = vi.fn(); await expect(runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true' }, prepareShared: prepare, runIngestion: run })).rejects.toThrow('ALLOW_LIVE_DATABASE_WRITE'); await expect(runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true', LIVE_MAX_PROVIDER_COST_USD: '0.001' }, prepareShared: prepare, runIngestion: run })).rejects.toThrow('exceeds'); expect(prepare).not.toHaveBeenCalled(); expect(run).not.toHaveBeenCalled() })
   it('prepares one shared cohort and reuses it across four distinct window cycles', async () => { const shared = { sharedInputs: { candidates: [{ normalizedQuery: 'same-topic' }] }, repository: {} }; const prepare = vi.fn(async () => shared); const run = vi.fn(async (env, received) => ({ cycle: env.LIVE_INGEST_CYCLE_ID, window: env.LIVE_INGEST_HISTORY_WINDOW, received })); const result = await runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true' }, now: new Date('2026-09-04T10:00:00Z'), prepareShared: prepare, runIngestion: run }); expect(prepare).toHaveBeenCalledTimes(1); expect(result.results).toHaveLength(4); expect(new Set(result.results.map((x) => x.cycle)).size).toBe(4); expect(result.results.map((x) => x.window)).toEqual(['24H', '7D', '30D', '1Y']); expect(result.results.every((x) => x.received === shared)).toBe(true); expect(run.mock.calls.every(([env]) => env.LIVE_INGEST_DRY_RUN === 'false')).toBe(true) })
   it('resolves discovery and fresh baseline cache exactly once for the shared slot cohort', async () => {

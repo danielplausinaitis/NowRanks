@@ -2,7 +2,8 @@ import { CATEGORIES } from '../../shared/categories.mjs'
 import { formatErrorDiagnostics } from '../ingestion/errorDiagnostics.mjs'
 
 const CATEGORY_SET = new Set(CATEGORIES)
-const MISSING_REASONS = new Set(['not-reported', 'source-unavailable', 'out-of-range', 'redacted'])
+export const LIVE_MISSING_REASONS = Object.freeze(['not-reported', 'source-unavailable', 'out-of-range', 'redacted', 'invalid-provider-measurement'])
+const MISSING_REASONS = new Set(LIVE_MISSING_REASONS)
 const COMPARABILITY_STATUSES = new Set(['comparable', 'not-comparable', 'unknown'])
 
 function requireText(value, label) {
@@ -32,6 +33,9 @@ function normalizeObservation({ observation, candidateId, seen }) {
   }
   if (!Number.isFinite(observation.measurement) || observation.measurement < 0) {
     throw new Error(`Live provider response measurement for ${candidateId} must be a finite non-negative number or null`)
+  }
+  if (observation.missingReason !== undefined && observation.missingReason !== null) {
+    throw new Error(`Live provider response available measurement for ${candidateId} must not include a missingReason`)
   }
   return { candidateId, date, observedAt, availability: 'available', interest: observation.measurement }
 }

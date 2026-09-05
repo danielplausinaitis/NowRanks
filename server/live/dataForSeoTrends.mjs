@@ -79,11 +79,29 @@ function hasSuccessfulTask(body) {
  * Converts one DataForSEO batch through the existing live adapter. Documented zero values mean
  * insufficient data, so they are represented as explicit missing observations, never invented zero interest.
  */
-export function normalizeDataForSeoMeasurement({ response, candidates, geographicScope, retrievedAt, adapter, requestMetadata }) {
+function normalizedGraphMeasurement(measurement, diagnostics, candidate) {
+  // DataForSEO graph values are numeric in the transport contract. Do not coerce numeric-looking
+  // strings: doing so would silently broaden that contract and could hide provider corruption.
+  if (Number.isFinite(measurement) && measurement >= 0) {
+    return measurement === 0
+      ? { measurement: null, missingReason: 'out-of-range' }
+      : { measurement }
+  }
+  diagnostics.invalidOrMissingMeasurements += 1
+  diagnostics.affectedCandidates.add(candidate.normalizedQuery)
+  return { measurement: null, missingReason: 'invalid-provider-measurement' }
+}
+
+/**
+ * Normalizes an otherwise valid provider graph while degrading invalid individual cells to
+ * explicit missing observations. Structural graph faults still throw; a bad cell never becomes 0.
+ */
+export function normalizeDataForSeoMeasurementWithDiagnostics({ response, candidates, geographicScope, retrievedAt, adapter, requestMetadata }) {
   if (!adapter?.normalize) throw new Error('A live provider adapter is required')
   if (!Array.isArray(candidates) || candidates.length === 0 || candidates.length > DATAFORSEO_MAX_KEYWORDS) throw new Error(`DataForSEO normalization requires one to ${DATAFORSEO_MAX_KEYWORDS} candidates`)
   const graph = graphFromResponse(response)
   if (graph.keywords.length !== candidates.length || graph.keywords.some((keyword, index) => keyword !== candidates[index].query)) throw new Error('DataForSEO graph keywords do not match the requested candidate order')
+  const diagnostics = { invalidOrMissingMeasurements: 0, affectedCandidates: new Set() }
   const topics = candidates.map((candidate, index) => ({
     sourceId: candidate.sourceId ?? candidate.normalizedQuery,
     query: candidate.query,
@@ -93,10 +111,7 @@ export function normalizeDataForSeoMeasurement({ response, candidates, geographi
       if (!Array.isArray(point.values) || point.values.length !== candidates.length) throw new Error('DataForSEO graph values do not match requested keywords')
       const measurement = point.values[index]
       const observedAt = unixTimestamp(point.timestamp, 'graph timestamp')
-      if (!Number.isFinite(measurement) || measurement < 0) throw new Error('DataForSEO graph measurement must be a finite non-negative number')
-      return measurement === 0
-        ? { observedAt, measurement: null, missingReason: 'out-of-range' }
-        : { observedAt, measurement }
+      return { observedAt, ...normalizedGraphMeasurement(measurement, diagnostics, candidate) }
     }),
   }))
   const normalized = adapter.normalize({
@@ -113,7 +128,7 @@ export function normalizeDataForSeoMeasurement({ response, candidates, geographi
     },
     topics,
   }, { retrievedAt })
-  return normalized.map((topic) => ({
+  const histories = normalized.map((topic) => ({
     ...topic,
     historyRequest: requestMetadata ? {
       timeRange: requestMetadata.time_range ?? null,
@@ -130,6 +145,12 @@ export function normalizeDataForSeoMeasurement({ response, candidates, geographi
       }
     }),
   }))
+  return { histories, diagnostics: { invalidOrMissingMeasurements: diagnostics.invalidOrMissingMeasurements, affectedCandidates: diagnostics.affectedCandidates.size } }
+}
+
+/** Backwards-compatible history-only normalizer for standalone callers. */
+export function normalizeDataForSeoMeasurement(args) {
+  return normalizeDataForSeoMeasurementWithDiagnostics(args).histories
 }
 
 export function createDataForSeoTrendsClient({ env = process.env, fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
