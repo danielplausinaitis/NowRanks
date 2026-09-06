@@ -46,6 +46,10 @@ ALLOW_LIVE_DATABASE_WRITE=true
 
 The scheduler preflight always prices the maximum paid cohort (not the initial batch), including four window-specific Trends passes and one cold Search Volume bulk refresh. Runtime diagnostics report the actual Trends candidates and provider-reported cost. Separate Established and Emerging lanes are never score-merged: Established entries occupy their own ordered slots first and Emerging entries use any remaining display slots. An undersupplied source remains an honest “up to 10” result.
 
+## Persisted live rank movement
+
+Live reads compare each current row with the closest strictly earlier successfully persisted live snapshot for the same selected window. Comparison is by stable candidate ID and the same lane only. `delta = previousRank - currentRank`: positive is `up`, negative is `down`, and zero is `unchanged`. A current topic absent from the preceding snapshot's same lane is `new`; when no preceding comparable snapshot exists all current entries are `unavailable`. A lane change is `new`, never a cross-lane comparison. Category filtering occurs only after this global lane movement is computed, so both displayed ranks and movement retain their persisted global semantics.
+
 ## First manual command
 
 The safe first run from Git Bash is:

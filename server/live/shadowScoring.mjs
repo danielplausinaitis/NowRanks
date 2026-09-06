@@ -1,6 +1,7 @@
 import { diagnoseHistoricalComponents } from './shadowTemporalDiagnostics.mjs'
 import { evaluateElapsedShadowHistory } from './elapsedShadowHistory.mjs'
 import { evaluateColdStartTrending } from './coldStartShadowScoring.mjs'
+import { trendHeat } from './trendPresentation.mjs'
 
 export const SHADOW_SEARCH_INTEREST_WEIGHTS = Object.freeze({ currentTrendIntensity: 0.7, baselineDemand: 0.3 })
 export const SHADOW_HISTORY_REQUIREMENTS = Object.freeze({ growth: 14, momentum: 14, consistency: 2, breakout: 14 })
@@ -175,6 +176,8 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
       maximumAgeHours: coldStartMaxAgeHours,
     }) : null
     const scorable = historyWindow ? evidence.eligible : missingComponents.length === 0
+    const establishedTrendingScore = scorable ? (historyWindow ? evidence.scores.trending : weightedScore(components, scoreWeights.trending)) : null
+    const emergingTrendingScore = emerging?.eligible ? emerging.score : null
     const searchInterestDiagnostic = searchInterest !== null
       ? { status: 'available', reason: null }
       : currentNormalized[index] === null
@@ -220,6 +223,15 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
         historicalPeakNormalized: shapes[index].peakNormalizedHistory,
       },
       components,
+      presentation: {
+        growthPercent: shapes[index].diagnostics.components?.growth?.growthPercentage ?? null,
+        trendHeat: trendHeat({
+          growth: components.growth,
+          momentum: components.momentum,
+          breakout: components.breakout,
+          trendingScore: establishedTrendingScore ?? emergingTrendingScore,
+        }),
+      },
       history: {
         count: shapes[index].historyCount,
         observationCount: shapes[index].observationCount,
@@ -247,10 +259,8 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
       shadowOverallScore: scorable
         ? historyWindow ? evidence.scores.overall : weightedScore(components, scoreWeights.overall)
         : null,
-      shadowTrendingScore: scorable
-        ? historyWindow ? evidence.scores.trending : weightedScore(components, scoreWeights.trending)
-        : null,
-      shadowEmergingTrendingScore: emerging?.eligible ? emerging.score : null,
+      shadowTrendingScore: establishedTrendingScore,
+      shadowEmergingTrendingScore: emergingTrendingScore,
     }
   })
   const emergingRanks = new Map(entries

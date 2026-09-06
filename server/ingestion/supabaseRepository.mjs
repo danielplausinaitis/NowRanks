@@ -49,13 +49,19 @@ export function createSupabaseIngestionRepository(supabase) {
     },
     /** Read-only live snapshot lookup. This deliberately never falls back to replay tables. */
     async getLatestLiveSnapshot({ selectedWindow }) {
-      return requireSuccess(await supabase.from('live_leaderboard_snapshots').select('*')
-        .eq('data_mode', 'live').eq('selected_window', selectedWindow)
+      return requireSuccess(await supabase.from('live_leaderboard_snapshots').select('*, ingestion_runs!inner(status)')
+        .eq('data_mode', 'live').eq('selected_window', selectedWindow).eq('ingestion_runs.status', 'succeeded')
         .order('scored_at', { ascending: false }).limit(1).maybeSingle(), 'select latest', 'live_leaderboard_snapshots')
     },
+    async getPreviousLiveSnapshot({ selectedWindow, beforeScoredAt }) {
+      return requireSuccess(await supabase.from('live_leaderboard_snapshots').select('*, ingestion_runs!inner(status)')
+        .eq('data_mode', 'live').eq('selected_window', selectedWindow).eq('ingestion_runs.status', 'succeeded')
+        .lt('scored_at', beforeScoredAt)
+        .order('scored_at', { ascending: false }).limit(1).maybeSingle(), 'select previous', 'live_leaderboard_snapshots')
+    },
     async getLiveSnapshot({ cycleId, selectedWindow }) {
-      return requireSuccess(await supabase.from('live_leaderboard_snapshots').select('*')
-        .eq('data_mode', 'live').eq('cycle_id', cycleId).eq('selected_window', selectedWindow)
+      return requireSuccess(await supabase.from('live_leaderboard_snapshots').select('*, ingestion_runs!inner(status)')
+        .eq('data_mode', 'live').eq('cycle_id', cycleId).eq('selected_window', selectedWindow).eq('ingestion_runs.status', 'succeeded')
         .maybeSingle(), 'select exact', 'live_leaderboard_snapshots')
     },
     async listLiveSnapshotEntries({ snapshotId }) {

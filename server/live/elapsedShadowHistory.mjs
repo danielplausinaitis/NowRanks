@@ -2,6 +2,8 @@ const HOUR_MS = 60 * 60 * 1000
 const DAY_MS = 24 * HOUR_MS
 const WEEK_MS = 7 * DAY_MS
 
+import { growthPercentage } from './trendPresentation.mjs'
+
 export const SHADOW_HISTORY_SEGMENT_COVERAGE = 0.8
 export const SHADOW_HISTORY_MAX_GAP_INTERVALS = 2
 
@@ -136,7 +138,10 @@ function growthComponent(points, end, definition) {
   const current = average(segments.recent.values)
   const previous = average(segments.previous.values)
   const value = Math.log1p(Math.max(0, current - previous)) * Math.sqrt(current) / Math.max(1, previous)
-  return calculated(value, { segments })
+  return calculated(value, {
+    segments,
+    growthPercentage: growthPercentage({ recentAverage: current, previousAverage: previous }),
+  })
 }
 
 function momentumComponent(points, end, definition) {

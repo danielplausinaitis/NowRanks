@@ -38,7 +38,7 @@ describe('Supabase live ingestion repository', () => {
     const calls = []
     const supabase = { from(table) {
       const query = {
-        select: vi.fn(() => query), eq: vi.fn(() => query), order: vi.fn(() => query), limit: vi.fn(() => query),
+        select: vi.fn(() => query), eq: vi.fn(() => query), lt: vi.fn(() => query), order: vi.fn(() => query), limit: vi.fn(() => query),
         maybeSingle: vi.fn(async () => ({ data: table === 'live_leaderboard_snapshots' ? { snapshot_id: 'snapshot' } : null, error: null })),
       }
       calls.push({ table, query })
@@ -46,9 +46,10 @@ describe('Supabase live ingestion repository', () => {
     } }
     const repository = createSupabaseIngestionRepository(supabase)
     await repository.getLatestLiveSnapshot({ selectedWindow: '1Y' })
+    await repository.getPreviousLiveSnapshot({ selectedWindow: '1Y', beforeScoredAt: '2026-09-04T12:00:00.000Z' })
     await repository.getLiveSnapshot({ cycleId: 'cycle', selectedWindow: '1Y' })
     await repository.listLiveSnapshotEntries({ snapshotId: 'snapshot' })
-    expect(calls.map((call) => call.table)).toEqual(['live_leaderboard_snapshots', 'live_leaderboard_snapshots', 'live_leaderboard_snapshot_entries'])
+    expect(calls.map((call) => call.table)).toEqual(['live_leaderboard_snapshots', 'live_leaderboard_snapshots', 'live_leaderboard_snapshots', 'live_leaderboard_snapshot_entries'])
     expect(calls.every(({ query }) => !('insert' in query) && !('update' in query) && !('upsert' in query))).toBe(true)
   })
 })

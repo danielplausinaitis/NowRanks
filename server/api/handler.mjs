@@ -37,7 +37,7 @@ function liveEntry(entry) {
     establishedTrendingScore: entry.establishedTrendingScore, emergingTrendingScore: entry.emergingTrendingScore,
     historyObservationCount: entry.historyObservationCount, historyAvailableCount: entry.historyAvailableCount,
     historyCoveragePercentage: entry.historyCoveragePercentage, searchInterest: entry.searchInterest,
-    componentAvailability: entry.componentAvailability, scoredAt: entry.scoredAt, cycleId: entry.cycleId, selectedWindow: entry.selectedWindow,
+    componentAvailability: entry.componentAvailability, growthPercent: entry.growthPercent, trendHeat: entry.trendHeat, scoredAt: entry.scoredAt, cycleId: entry.cycleId, selectedWindow: entry.selectedWindow, movement: entry.movement,
   }
 }
 

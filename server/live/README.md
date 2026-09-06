@@ -92,6 +92,10 @@ The shadow command now also evaluates the separate model documented in `COLD_STA
 
 `LIVE_PERSISTENCE.md` documents the additive schema, deterministic live cycle identities, separate Established/Emerging snapshot contract, dry-run-first command, and independent `ALLOW_LIVE_DATABASE_WRITE` gate. The path remains manual and server-only; it does not switch the API or frontend away from replay data.
 
+## Persisted live movement
+
+The read-only live leaderboard compares a current snapshot with the closest strictly earlier snapshot from a succeeded live ingestion run for the same window. It keys comparison by persisted candidate ID and lane, not display title: `previousRank - currentRank` yields `up`, `down`, or `unchanged`; same-lane absence is `new`; and no prior comparable snapshot is `unavailable`. Established and Emerging are never compared or merged. Category filtering happens after this computation and preserves the stored global lane ranks and their movement.
+
 Run a deliberately bounded discovery-based external check manually:
 
 ```powershell

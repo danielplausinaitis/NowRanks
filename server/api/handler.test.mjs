@@ -22,7 +22,7 @@ function liveResult() {
     scoreLane: lane, laneRank: rank, classification: lane === 'established' ? 'established' : 'possible-new-trend', confidence: lane === 'established' ? 'full' : 'emerging', confidenceReason: 'persisted evidence',
     scoreBasis: lane === 'established' ? 'historical-trending' : 'current-emerging-evidence', overallScore: lane === 'established' ? 80 : null,
     establishedTrendingScore: lane === 'established' ? 70 : null, emergingTrendingScore: lane === 'emerging' ? 60 : null,
-    historyObservationCount: 365, historyAvailableCount: 365, historyCoveragePercentage: 100, searchInterest: 40, componentAvailability: {}, scoredAt: '2026-09-02T18:00:00.000Z', cycleId: 'cycle-1', selectedWindow: '1Y',
+    historyObservationCount: 365, historyAvailableCount: 365, historyCoveragePercentage: 100, searchInterest: 40, componentAvailability: {}, scoredAt: '2026-09-02T18:00:00.000Z', cycleId: 'cycle-1', selectedWindow: '1Y', movement: { state: 'unavailable', delta: null, previousRank: null },
   })
   return { snapshot: { cycleId: 'cycle-1', selectedWindow: '1Y', scoredAt: '2026-09-02T18:00:00.000Z' }, established: [entry({ lane: 'established', rank: 1 }), entry({ lane: 'established', rank: 2, category: 'Sports' })], emerging: [entry({ lane: 'emerging', rank: 1 }), entry({ lane: 'emerging', rank: 2, category: 'Sports' })] }
 }
@@ -144,7 +144,7 @@ describe('read-only leaderboard HTTP API handler', () => {
       dataMode: 'live', source: 'persisted-live-snapshot', persisted: true,
       snapshot: { cycleId: 'cycle-1', selectedWindow: '1Y' },
       metadata: { mode: 'trending', establishedCount: 2, emergingCount: 2 },
-      established: expect.arrayContaining([expect.objectContaining({ laneRank: 1, overallScore: 80, emergingTrendingScore: null })]),
+      established: expect.arrayContaining([expect.objectContaining({ laneRank: 1, overallScore: 80, emergingTrendingScore: null, movement: { state: 'unavailable', delta: null, previousRank: null } })]),
       emerging: expect.arrayContaining([expect.objectContaining({ laneRank: 1, overallScore: null, emergingTrendingScore: 60 })]),
     })
     expect(result.body).not.toMatch(/replay|unified.*rank/i)
@@ -164,6 +164,7 @@ describe('read-only leaderboard HTTP API handler', () => {
     expect(result.json.metadata).toMatchObject({ category: 'Sports', categoryRankSemantics: 'persisted-global-lane-rank-not-reranked' })
     expect(result.json.established.map((entry) => entry.laneRank)).toEqual([2])
     expect(result.json.emerging.map((entry) => entry.laneRank)).toEqual([2])
+    expect(result.json.established[0].movement).toEqual({ state: 'unavailable', delta: null, previousRank: null })
   })
 
   it('returns an explicit 404 for a missing live snapshot with no replay fallback', async () => {

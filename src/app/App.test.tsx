@@ -4,7 +4,7 @@ import { App } from './App'
 import type { LeaderboardApiResponse, LiveLeaderboardApiResponse, ReplayLeaderboardApiResponse } from '../data/leaderboardApi'
 import type { Category } from '../domain/types'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); window.location.hash = '' })
 
 const apiResult = (topic = 'API topic', window: '24H' | '7D' | '30D' | '1Y' = '7D', category: Category = 'Technology'): ReplayLeaderboardApiResponse => ({
   metadata: { providerId: 'google-trending-now', dataMode: 'replay', window, mode: 'overall', category: null, observedFrom: '2026-08-19', observedThrough: '2026-08-25', comparisonAvailable: true, comparisonObservedThrough: '2026-08-24', generatedAt: '2026-08-26T00:00:00.000Z' },
@@ -16,9 +16,22 @@ function liveResult(): LiveLeaderboardApiResponse {
     candidateId: `${lane}-${rank}`, query: `${lane} query ${rank}`, title: `${lane} topic ${rank}`, normalizedQuery: `${lane}-${rank}`, category, scoreLane: lane, laneRank: rank,
     classification: lane === 'established' ? 'established' as const : 'possible-new-trend' as const, confidence: lane === 'established' ? 'full' as const : 'emerging' as const, confidenceReason: 'persisted evidence', scoreBasis: lane === 'established' ? 'historical-trending' as const : 'current-emerging-evidence' as const,
     overallScore: lane === 'established' ? 88 : null, establishedTrendingScore: lane === 'established' ? 71 : null, emergingTrendingScore: lane === 'emerging' ? 63 : null,
-    historyObservationCount: 365, historyAvailableCount: 365, historyCoveragePercentage: 100, searchInterest: 42, componentAvailability: {}, scoredAt: '2026-09-02T18:00:00.000Z', cycleId: 'cycle-1', selectedWindow: '1Y' as const,
+    historyObservationCount: 365, historyAvailableCount: 365, historyCoveragePercentage: 100, searchInterest: 42, componentAvailability: {}, scoredAt: '2026-09-02T18:00:00.000Z', cycleId: 'cycle-1', selectedWindow: '1Y' as const, movement: { state: 'unavailable' as const, delta: null, previousRank: null },
   })
   return { dataMode: 'live', source: 'persisted-live-snapshot', persisted: true, snapshot: { cycleId: 'cycle-1', selectedWindow: '1Y', scoredAt: '2026-09-02T18:00:00.000Z' }, metadata: { mode: 'overall', category: null, establishedCount: 2, emergingCount: 0, categoryRankSemantics: 'persisted-global-lane-rank' }, established: [entry('established', 1), entry('established', 4, 'Sports')], emerging: [entry('emerging', 1), entry('emerging', 3, 'Sports')] }
+}
+
+function liveResultWithCounts(establishedCount: number, emergingCount: number): LiveLeaderboardApiResponse {
+  const result = liveResult()
+  const make = (lane: 'established' | 'emerging', count: number) => Array.from({ length: count }, (_, index) => {
+    const base = lane === 'established' ? result.established[0] : result.emerging[0]
+    const rank = index + 1
+    return { ...base, candidateId: `${lane}-${rank}`, query: `${lane} query ${rank}`, title: `${lane} topic ${rank}`, normalizedQuery: `${lane}-${rank}`, laneRank: rank, category: rank % 2 === 0 ? 'Sports' as const : 'Technology' as const }
+  })
+  result.established = make('established', establishedCount)
+  result.emerging = make('emerging', emergingCount)
+  result.metadata = { ...result.metadata, establishedCount, emergingCount }
+  return result
 }
 
 describe('App', () => {
@@ -174,19 +187,71 @@ describe('App', () => {
     expect(screen.getAllByText('N/A')).toHaveLength(2)
   })
 
-  it('renders live Trending in separate persisted-rank lanes with an Emerging indicator', async () => {
-    const response = liveResult(); response.metadata.mode = 'trending'; response.metadata.emergingCount = 2
+  it('renders 7 Established and 3 Emerging topics as one truthful ten-position Trending table', async () => {
+    const response = liveResultWithCounts(7, 3); response.metadata.mode = 'trending'
     render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={vi.fn(async ({ mode }) => ({ ...response, metadata: { ...response.metadata, mode } }))} />)
     await screen.findByText('established topic 1')
     fireEvent.click(screen.getByRole('button', { name: /Trending/i }))
-    expect(await screen.findByRole('heading', { name: 'Established Trending' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Emerging' })).toBeInTheDocument()
+    expect(await screen.findByText('emerging topic 3')).toBeInTheDocument()
+    expect(screen.getAllByRole('table')).toHaveLength(1)
+    expect(screen.getAllByRole('row')).toHaveLength(11)
+    expect(screen.queryByRole('heading', { name: 'Established Trending' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Emerging' })).not.toBeInTheDocument()
     expect(screen.getByText('emerging topic 1')).toBeInTheDocument()
-    expect(screen.getAllByText('Emerging').length).toBeGreaterThan(1)
-    expect(screen.getByText(/limited historical evidence/i)).toBeInTheDocument()
-    expect(screen.getByText('#4')).toBeInTheDocument()
-    expect(screen.getByText('#3')).toBeInTheDocument()
-    expect(screen.queryByText(/unified rank/i)).not.toBeInTheDocument()
+    expect(screen.getAllByText('Established')).toHaveLength(7)
+    expect(screen.getAllByText('Emerging')).toHaveLength(3)
+    for (let position = 1; position <= 10; position += 1) expect(screen.getByText(`#${position}`)).toBeInTheDocument()
+    expect(response.emerging[0].laneRank).toBe(1)
+    expect(screen.getByText('emerging topic 1').closest('tr')?.firstChild).toHaveTextContent('#8')
+  })
+
+  it('renders short and empty live Overall states without fabricating rows', async () => {
+    const short = liveResultWithCounts(7, 3)
+    const apiClient = vi.fn(async () => short)
+    const { rerender } = render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={apiClient} />)
+    expect(await screen.findByText('established topic 7')).toBeInTheDocument()
+    expect(screen.getAllByRole('row')).toHaveLength(8)
+    expect(screen.getByText(/7 topics currently meet the Overall evidence requirements/i)).toBeInTheDocument()
+    const empty = liveResultWithCounts(0, 3)
+    rerender(<App useLeaderboardApi leaderboardDataSource="live" apiClient={vi.fn(async () => empty)} />)
+    expect(await screen.findByRole('heading', { name: 'Not enough established evidence yet' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'View Trending' })).toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('renders fewer eligible Trending topics truthfully and keeps category-filtered lane ranks in the API result', async () => {
+    const all = liveResultWithCounts(2, 1)
+    const sports = liveResultWithCounts(1, 1)
+    sports.established[0] = { ...sports.established[0], category: 'Sports', laneRank: 2 }
+    sports.emerging[0] = { ...sports.emerging[0], category: 'Sports', laneRank: 3 }
+    const apiClient = vi.fn(async ({ category, mode }) => ({ ...(category === 'Sports' ? sports : all), metadata: { ...(category === 'Sports' ? sports : all).metadata, mode } }))
+    render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={apiClient} />)
+    await screen.findByText('established topic 1')
+    fireEvent.click(screen.getByRole('button', { name: /Trending/i }))
+    expect(await screen.findByText('emerging topic 1')).toBeInTheDocument()
+    expect(screen.getAllByRole('row')).toHaveLength(4)
+    expect(screen.queryByText('#4')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'Sports' } })
+    await waitFor(() => expect(apiClient).toHaveBeenLastCalledWith(expect.objectContaining({ category: 'Sports', mode: 'trending' })))
+    expect(sports.established[0].laneRank).toBe(2)
+    expect(sports.emerging[0].laneRank).toBe(3)
+    expect(screen.getByText('established topic 1').closest('tr')?.firstChild).toHaveTextContent('#1')
+  })
+
+  it('renders server-provided lane-isolated live movement without recalculating it', async () => {
+    const response = liveResult()
+    response.established[0].movement = { state: 'up', delta: 3, previousRank: 4 }
+    response.established[1].movement = { state: 'down', delta: -2, previousRank: 2 }
+    response.emerging[0].movement = { state: 'new', delta: null, previousRank: null }
+    response.emerging[1].movement = { state: 'unchanged', delta: 0, previousRank: 3 }
+    const apiClient = vi.fn(async ({ mode }) => ({ ...response, metadata: { ...response.metadata, mode: mode as 'overall' | 'trending' } }))
+    render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={apiClient} />)
+    await screen.findByText('established topic 1')
+    fireEvent.click(screen.getByRole('button', { name: /Trending/i }))
+    expect(await screen.findByText('↑ 3')).toBeInTheDocument()
+    expect(screen.getByText('↓ 2')).toBeInTheDocument()
+    expect(screen.getByText('NEW')).toBeInTheDocument()
+    expect(screen.getByText('—')).toBeInTheDocument()
   })
 
   it('shows the live no-snapshot error and never falls back to replay', async () => {
@@ -194,5 +259,31 @@ describe('App', () => {
     render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={apiClient} />)
     expect(await screen.findByRole('alert')).toHaveTextContent('No live snapshot is available for this window yet.')
     expect(screen.queryByText('iPhone 17 Pro release date')).not.toBeInTheDocument()
+  })
+
+  it('renders window-specific heat and a truthful growth comparison from the live response', async () => {
+    const response = liveResult()
+    response.metadata.mode = 'trending'
+    response.established[0] = { ...response.established[0], trendHeat: 'surging', growthPercent: 184 }
+    render(<App useLeaderboardApi leaderboardDataSource="live" apiClient={vi.fn(async ({ mode }) => ({ ...response, metadata: { ...response.metadata, mode } }))} />)
+    fireEvent.click(screen.getByRole('button', { name: /Trending/i }))
+    expect(await screen.findByText('surging')).toBeInTheDocument()
+    expect(screen.getByText('+184%')).toBeInTheDocument()
+  })
+
+  it('routes to Premium, legal, and an unknown-page state without changing leaderboard data', async () => {
+    window.location.hash = '#/premium'
+    render(<App useLeaderboardApi apiClient={vi.fn(async () => apiResult())} />)
+    expect(screen.getByRole('heading', { name: /See the signal before it becomes obvious/i })).toBeInTheDocument()
+    window.location.hash = '#/methodology'; window.dispatchEvent(new HashChangeEvent('hashchange'))
+    expect(await screen.findByRole('heading', { name: /Attention, made legible/i })).toBeInTheDocument()
+    window.location.hash = '#/missing'; window.dispatchEvent(new HashChangeEvent('hashchange'))
+    expect(await screen.findByRole('heading', { name: /This signal has moved/i })).toBeInTheDocument()
+  })
+
+  it('shows a graceful sign-in configuration state and never pretends authentication succeeded', async () => {
+    render(<App useLeaderboardApi apiClient={vi.fn(async () => apiResult())} authClient={null} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/not configured/i)
   })
 })

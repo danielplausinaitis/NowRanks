@@ -9,6 +9,13 @@ export const LIVE_READ_CYCLE_ID_ENV = 'LIVE_READ_CYCLE_ID'
 function score(value) {
   return typeof value === 'number' ? value.toFixed(2) : 'N/A'
 }
+function movement(entry) {
+  const value = entry.movement
+  if (!value || value.state === 'unavailable') return 'N/A'
+  if (value.state === 'new') return 'NEW'
+  if (value.state === 'unchanged') return '—'
+  return value.state === 'up' ? `↑ ${value.delta}` : `↓ ${Math.abs(value.delta)}`
+}
 
 export async function runLiveReadCheck({ env = process.env, write = console.log, createClient = createServerSupabaseClient, createRepository = createSupabaseIngestionRepository, read = readLiveLeaderboard } = {}) {
   const selectedWindow = env[LIVE_READ_WINDOW_ENV] || '1Y'
@@ -23,10 +30,10 @@ export async function runLiveReadCheck({ env = process.env, write = console.log,
   write(`scored_at: ${result.snapshot.scoredAt}`)
   write('')
   write('Established:')
-  result.established.forEach((entry) => write(`#${entry.laneRank} ${entry.title} | overall ${score(entry.overallScore)} | trending ${score(entry.establishedTrendingScore)} | confidence ${entry.confidence}`))
+  result.established.forEach((entry) => write(`#${entry.laneRank} ${entry.title} | overall ${score(entry.overallScore)} | trending ${score(entry.establishedTrendingScore)} | movement ${movement(entry)} | confidence ${entry.confidence}`))
   write('')
   write('Emerging:')
-  result.emerging.forEach((entry) => write(`#${entry.laneRank} ${entry.title} | emerging trending ${score(entry.emergingTrendingScore)} | confidence ${entry.confidence}`))
+  result.emerging.forEach((entry) => write(`#${entry.laneRank} ${entry.title} | emerging trending ${score(entry.emergingTrendingScore)} | movement ${movement(entry)} | confidence ${entry.confidence}`))
   write('')
   write('Counts:')
   write(`established: ${result.established.length}`)

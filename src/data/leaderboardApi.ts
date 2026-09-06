@@ -6,6 +6,13 @@ export type ApiRankMovement =
   | { status: 'new', delta: null, previousRank: null }
   | { status: 'unavailable', delta: null, previousRank: null }
 
+export type LiveRankMovement =
+  | { state: 'up', delta: number, previousRank: number }
+  | { state: 'down', delta: number, previousRank: number }
+  | { state: 'unchanged', delta: 0, previousRank: number }
+  | { state: 'new', delta: null, previousRank: null }
+  | { state: 'unavailable', delta: null, previousRank: null }
+
 export interface ReplayLeaderboardApiResponse {
   metadata: {
     providerId: string
@@ -42,9 +49,12 @@ export interface LiveLeaderboardApiEntry {
   historyCoveragePercentage: number
   searchInterest: number | null
   componentAvailability: Record<string, unknown>
+  growthPercent?: number | null
+  trendHeat?: 'stable' | 'rising' | 'fast' | 'surging' | 'exploding' | null
   scoredAt: string
   cycleId: string
   selectedWindow: TimeWindow
+  movement: LiveRankMovement
 }
 
 export interface LiveLeaderboardApiResponse {

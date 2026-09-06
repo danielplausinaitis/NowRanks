@@ -104,11 +104,17 @@ function rankScores(scores, scoreKey, limit = Infinity) {
 }
 
 function componentAvailability(entry) {
-  return Object.fromEntries(Object.entries(entry.components).map(([component, value]) => [component, {
+  return {
+    ...Object.fromEntries(Object.entries(entry.components).map(([component, value]) => [component, {
     available: value !== null,
     value,
     reason: entry.componentDiagnostics?.[component]?.reason ?? null,
-  }]))
+    }])),
+    presentation: {
+      growthPercent: entry.presentation?.growthPercent ?? null,
+      trendHeat: entry.presentation?.trendHeat ?? null,
+    },
+  }
 }
 
 export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, candidates, volumes, histories, scores, displayLimit = DEFAULT_LIVE_DISPLAY_LIMIT }) {

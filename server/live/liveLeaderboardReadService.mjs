@@ -1,4 +1,5 @@
 const WINDOWS = new Set(['24H', '7D', '30D', '1Y'])
+import { isTrendHeat } from './trendPresentation.mjs'
 
 export class LiveSnapshotNotFoundError extends Error {
   constructor({ selectedWindow, cycleId }) {
@@ -40,6 +41,7 @@ function mapEntry(row, snapshot) {
   const established = row.score_lane === 'established'
   assert(established ? row.emerging_trending_score === null : row.overall_score === null, `entry ${row.snapshot_entry_id} violates ${established ? 'established' : 'emerging'} score invariants`)
   assert(established ? row.overall_score !== null && row.established_trending_score !== null : row.established_trending_score === null && row.emerging_trending_score !== null, `entry ${row.snapshot_entry_id} has incomplete lane scores`)
+  const presentation = row.component_availability?.presentation ?? {}
   return {
     candidateId: row.candidate_id,
     query: candidate.query_text,
@@ -60,10 +62,35 @@ function mapEntry(row, snapshot) {
     historyCoveragePercentage: row.history_coverage_percentage,
     searchInterest: row.search_interest_component,
     componentAvailability: row.component_availability,
+    growthPercent: Number.isFinite(presentation.growthPercent) ? presentation.growthPercent : null,
+    trendHeat: isTrendHeat(presentation.trendHeat) ? presentation.trendHeat : null,
     scoredAt: snapshot.scoredAt,
     cycleId: snapshot.cycleId,
     selectedWindow: snapshot.selectedWindow,
   }
+}
+
+function validateLaneEntries(entries) {
+  const ranks = { established: new Set(), emerging: new Set() }
+  const candidates = new Set()
+  for (const entry of entries) {
+    if (ranks[entry.scoreLane].has(entry.laneRank)) malformed(`duplicate ${entry.scoreLane} lane rank ${entry.laneRank}`)
+    if (candidates.has(entry.candidateId)) malformed(`duplicate candidate ${entry.candidateId} across live lanes`)
+    ranks[entry.scoreLane].add(entry.laneRank); candidates.add(entry.candidateId)
+  }
+}
+
+/** Computes movement only within a persisted lane; lane changes are deliberately new entries. */
+export function computeLiveLaneMovement({ currentEntries, previousEntries, previousSnapshotExists }) {
+  if (!previousSnapshotExists) return currentEntries.map((entry) => ({ ...entry, movement: { state: 'unavailable', delta: null, previousRank: null } }))
+  validateLaneEntries(previousEntries)
+  const previousRanks = new Map(previousEntries.map((entry) => [`${entry.scoreLane}\u0000${entry.candidateId}`, entry.laneRank]))
+  return currentEntries.map((entry) => {
+    const previousRank = previousRanks.get(`${entry.scoreLane}\u0000${entry.candidateId}`)
+    if (previousRank === undefined) return { ...entry, movement: { state: 'new', delta: null, previousRank: null } }
+    const delta = previousRank - entry.laneRank
+    return { ...entry, movement: { state: delta > 0 ? 'up' : delta < 0 ? 'down' : 'unchanged', delta, previousRank } }
+  })
 }
 
 /** Returns persisted live scores as two independent, intentionally non-unified lanes. */
@@ -76,11 +103,14 @@ export async function readLiveLeaderboard({ repository, selectedWindow = '1Y', c
   if (!header) throw new LiveSnapshotNotFoundError({ selectedWindow, cycleId })
   const snapshot = mapSnapshot(header)
   const entries = (await repository.listLiveSnapshotEntries({ snapshotId: snapshot.snapshotId })).map((row) => mapEntry(row, snapshot))
+  validateLaneEntries(entries)
+  const previousHeader = await repository.getPreviousLiveSnapshot({ selectedWindow, beforeScoredAt: snapshot.scoredAt })
+  const previousEntries = previousHeader
+    ? (await repository.listLiveSnapshotEntries({ snapshotId: mapSnapshot(previousHeader).snapshotId })).map((row) => mapEntry(row, mapSnapshot(previousHeader)))
+    : []
+  const entriesWithMovement = computeLiveLaneMovement({ currentEntries: entries, previousEntries, previousSnapshotExists: Boolean(previousHeader) })
   const lanes = { established: [], emerging: [] }
-  const ranks = { established: new Set(), emerging: new Set() }
-  for (const entry of entries) {
-    if (ranks[entry.scoreLane].has(entry.laneRank)) malformed(`duplicate ${entry.scoreLane} lane rank ${entry.laneRank}`)
-    ranks[entry.scoreLane].add(entry.laneRank)
+  for (const entry of entriesWithMovement) {
     lanes[entry.scoreLane].push(entry)
   }
   lanes.established.sort((a, b) => a.laneRank - b.laneRank)
