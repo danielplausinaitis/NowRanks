@@ -19,7 +19,7 @@ function validateLeaderboardQuery(searchParams) {
   for (const key of searchParams.keys()) if (!allowed.has(key)) throw new Error(`Unsupported query parameter: ${key}`)
   for (const key of allowed) if (searchParams.getAll(key).length > 1) throw new Error(`Query parameter ${key} may only be supplied once`)
 
-  const window = searchParams.get('window') ?? '7D'
+  const window = searchParams.get('window') ?? '24H'
   if (!SUPPORTED_WINDOWS.has(window)) throw new Error('window must be one of 24H, 7D, 30D, or 1Y')
   const category = searchParams.get('category')
   if (category !== null && !category.trim()) throw new Error('category must be non-empty when supplied')
@@ -37,22 +37,36 @@ function liveEntry(entry) {
     establishedTrendingScore: entry.establishedTrendingScore, emergingTrendingScore: entry.emergingTrendingScore,
     historyObservationCount: entry.historyObservationCount, historyAvailableCount: entry.historyAvailableCount,
     historyCoveragePercentage: entry.historyCoveragePercentage, searchInterest: entry.searchInterest,
-    componentAvailability: entry.componentAvailability, growthPercent: entry.growthPercent, trendHeat: entry.trendHeat, scoredAt: entry.scoredAt, cycleId: entry.cycleId, selectedWindow: entry.selectedWindow, movement: entry.movement,
+    componentAvailability: entry.componentAvailability, growthPercent: entry.growthPercent, growthSource: entry.growthSource, growthSaturated: entry.growthSaturated, trendHeat: entry.trendHeat, scoredAt: entry.scoredAt, cycleId: entry.cycleId, selectedWindow: entry.selectedWindow, movement: entry.movement,
+    publicRank: entry.publicRank ?? null, publicScore: entry.publicScore ?? null, evidenceStatus: entry.evidenceStatus ?? null,
   }
 }
 
 function liveResponse({ result, mode, category }) {
+  const withinCategory = (entry) => category === null || entry.category === category
+  if (result.rankingMode === 'unified') {
+    const entries = result.entries.filter(withinCategory)
+    return {
+      dataMode: 'live', source: 'persisted-live-snapshot', persisted: true, rankingMode: 'unified', window: result.snapshot.selectedWindow,
+      snapshot: { cycleId: result.snapshot.cycleId, selectedWindow: result.snapshot.selectedWindow, scoredAt: result.snapshot.scoredAt, snapshotFormatVersion: result.snapshot.snapshotFormatVersion },
+      metadata: { mode, category, entryCount: entries.length, categoryRankSemantics: category === null ? 'persisted-global-public-rank' : 'persisted-global-public-rank-not-reranked', compatibility: result.compatibility },
+      entries: entries.map(liveEntry),
+    }
+  }
+  if (result.rankingMode === 'unsupported') {
+    return { dataMode: 'live', source: 'persisted-live-snapshot', persisted: true, rankingMode: 'unsupported', window: result.snapshot.selectedWindow, snapshot: { cycleId: result.snapshot.cycleId, selectedWindow: result.snapshot.selectedWindow, scoredAt: result.snapshot.scoredAt, snapshotFormatVersion: result.snapshot.snapshotFormatVersion }, metadata: { mode, category, compatibility: result.compatibility }, entries: [] }
+  }
   // Snapshot ranks are persisted for the full cohort. A category filter therefore
   // narrows each lane but deliberately preserves those ranks rather than fabricating reranks.
-  const withinCategory = (entry) => category === null || entry.category === category
   const established = result.established.filter(withinCategory)
   const emerging = mode === 'trending' ? result.emerging.filter(withinCategory) : []
   return {
-    dataMode: 'live', source: 'persisted-live-snapshot', persisted: true,
+    dataMode: 'live', source: 'persisted-live-snapshot', persisted: true, rankingMode: 'legacy-lanes',
     snapshot: { cycleId: result.snapshot.cycleId, selectedWindow: result.snapshot.selectedWindow, scoredAt: result.snapshot.scoredAt },
     metadata: {
       mode, category, establishedCount: established.length, emergingCount: emerging.length,
       categoryRankSemantics: category === null ? 'persisted-global-lane-rank' : 'persisted-global-lane-rank-not-reranked',
+      compatibility: result.compatibility,
     },
     established: established.map(liveEntry),
     emerging: emerging.map(liveEntry),
@@ -60,7 +74,7 @@ function liveResponse({ result, mode, category }) {
 }
 
 /** Pure HTTP request handler; replay and persisted-live reads are explicit and isolated. */
-export function createApiHandler({ dataSource = 'replay', leaderboardService, liveLeaderboardRead, logger = console }) {
+export function createApiHandler({ dataSource = 'live', leaderboardService, liveLeaderboardRead, logger = console }) {
   if (!['replay', 'live'].includes(dataSource)) throw new Error('Leaderboard data source must be replay or live')
   if (dataSource === 'replay' && typeof leaderboardService?.getLeaderboard !== 'function') throw new Error('A leaderboard application service is required')
   if (dataSource === 'live' && typeof liveLeaderboardRead !== 'function') throw new Error('A live leaderboard read service is required')

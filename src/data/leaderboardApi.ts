@@ -50,6 +50,8 @@ export interface LiveLeaderboardApiEntry {
   searchInterest: number | null
   componentAvailability: Record<string, unknown>
   growthPercent?: number | null
+  growthSource?: 'nowranks-history' | 'provider-history' | 'discovery-increase' | 'unavailable'
+  growthSaturated?: boolean
   trendHeat?: 'stable' | 'rising' | 'fast' | 'surging' | 'exploding' | null
   scoredAt: string
   cycleId: string
@@ -61,7 +63,8 @@ export interface LiveLeaderboardApiResponse {
   dataMode: 'live'
   source: 'persisted-live-snapshot'
   persisted: true
-  snapshot: { cycleId: string, selectedWindow: TimeWindow, scoredAt: string }
+  rankingMode?: 'legacy-lanes'
+  snapshot: { cycleId: string, selectedWindow: TimeWindow, scoredAt: string, snapshotFormatVersion?: 1 }
   metadata: {
     mode: RankingMode
     category: Category | null
@@ -73,7 +76,25 @@ export interface LiveLeaderboardApiResponse {
   emerging: LiveLeaderboardApiEntry[]
 }
 
-export type LeaderboardApiResponse = ReplayLeaderboardApiResponse | LiveLeaderboardApiResponse
+export interface UnifiedLiveLeaderboardApiEntry extends Omit<LiveLeaderboardApiEntry, 'scoreLane' | 'laneRank' | 'scoreBasis' | 'overallScore' | 'establishedTrendingScore' | 'emergingTrendingScore'> {
+  publicRank: number
+  publicScore: number
+  evidenceStatus: 'established' | 'emerging'
+}
+
+export interface UnifiedLiveLeaderboardApiResponse {
+  dataMode: 'live'
+  source: 'persisted-live-snapshot'
+  persisted: true
+  rankingMode: 'unified' | 'unsupported'
+  window: TimeWindow
+  snapshot: { cycleId: string, selectedWindow: TimeWindow, scoredAt: string, snapshotFormatVersion: number }
+  metadata: { mode: RankingMode, category: Category | null, compatibility: { status: string, snapshotFormatVersion?: number, diagnostics: unknown[] } }
+  entries: UnifiedLiveLeaderboardApiEntry[]
+}
+
+export type LiveApiResponse = LiveLeaderboardApiResponse | UnifiedLiveLeaderboardApiResponse
+export type LeaderboardApiResponse = ReplayLeaderboardApiResponse | LiveApiResponse
 
 export class LeaderboardApiError extends Error {
   constructor(message: string, readonly status?: number, readonly code?: string) {
@@ -83,7 +104,7 @@ export class LeaderboardApiError extends Error {
 }
 
 /** Browser-only client for the public, read-only leaderboard API. */
-export async function fetchLeaderboard({ window, mode, category, signal }: { window: TimeWindow, mode: RankingMode, category?: Category, signal?: AbortSignal }): Promise<LeaderboardApiResponse> {
+export async function fetchLeaderboard({ window, mode, category, signal }: { window: TimeWindow, mode: RankingMode, category?: Category, signal?: AbortSignal }): Promise<UnifiedLiveLeaderboardApiResponse> {
   const params = new URLSearchParams({ window, mode })
   if (category) params.set('category', category)
   const response = await fetch(`/api/leaderboard?${params}`, { signal, headers: { Accept: 'application/json' } })
@@ -93,16 +114,23 @@ export async function fetchLeaderboard({ window, mode, category, signal }: { win
     const message = code === 'live_snapshot_not_found' ? 'No live snapshot is available for this window yet.' : 'The leaderboard service is unavailable. Please try again.'
     throw new LeaderboardApiError(message, response.status, code)
   }
-  if (isReplayResponse(data) || isLiveResponse(data)) return data
-  throw new LeaderboardApiError('The leaderboard service returned an invalid response.')
+  if (isPersistedUnifiedLiveResponse(data, window)) return data
+  throw new LeaderboardApiError('The leaderboard service did not return a persisted live public snapshot.')
 }
 
-function isReplayResponse(data: unknown): data is ReplayLeaderboardApiResponse {
-  return typeof data === 'object' && data !== null && 'metadata' in data && 'entries' in data && Array.isArray(data.entries)
-}
-
-function isLiveResponse(data: unknown): data is LiveLeaderboardApiResponse {
-  return typeof data === 'object' && data !== null && (data as { dataMode?: unknown }).dataMode === 'live'
+function isPersistedUnifiedLiveResponse(data: unknown, requestedWindow: TimeWindow): data is UnifiedLiveLeaderboardApiResponse {
+  const entries = typeof data === 'object' && data !== null ? (data as { entries?: unknown }).entries : null
+  return typeof data === 'object' && data !== null
+    && (data as { dataMode?: unknown }).dataMode === 'live'
     && (data as { source?: unknown }).source === 'persisted-live-snapshot'
-    && Array.isArray((data as { established?: unknown }).established) && Array.isArray((data as { emerging?: unknown }).emerging)
+    && (data as { rankingMode?: unknown }).rankingMode === 'unified'
+    && (data as { window?: unknown }).window === requestedWindow
+    && (data as { snapshot?: { selectedWindow?: unknown } }).snapshot?.selectedWindow === requestedWindow
+    && (data as { snapshot?: { snapshotFormatVersion?: unknown } }).snapshot?.snapshotFormatVersion === 2
+    && Array.isArray(entries)
+    && entries.every((entry) => typeof entry === 'object' && entry !== null
+      && Number.isInteger((entry as { publicRank?: unknown }).publicRank)
+      && (entry as { publicRank: number }).publicRank >= 1
+      && (entry as { publicRank: number }).publicRank <= 20
+      && Number.isFinite((entry as { publicScore?: unknown }).publicScore))
 }

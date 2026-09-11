@@ -70,4 +70,17 @@ describe('shadow live scoring', () => {
     }
     expect(first.filter((entry) => entry.topic !== 'Zulu').map((entry) => entry.topic)).toEqual(['Alpha', 'Beta'])
   })
+  it('uses a validated vault result only in preferred mode and otherwise retains provider presentation', () => {
+    const input = candidate('Vault', 100, 1000, Array.from({ length: 14 }, (_, index) => index + 10))
+    input.vaultGrowth = { status: 'available', growthPercent: 10_902, confidence: 'high', promotion: { promotedInPreferred: true } }
+    input.vaultGrowthMode = 'shadow'
+    const shadow = scoreShadowLiveCohort({ candidates: [input], signalEngine, scoreWeights: SCORE_WEIGHTS })[0]
+    expect(shadow.presentation.growthSource).not.toBe('nowranks-history')
+    input.vaultGrowthMode = 'preferred'
+    const preferred = scoreShadowLiveCohort({ candidates: [input], signalEngine, scoreWeights: SCORE_WEIGHTS })[0]
+    expect(preferred.presentation).toMatchObject({ growthPercent: 10_902, growthSource: 'nowranks-history', growthSaturated: false })
+    input.vaultGrowth.promotion = { promotedInPreferred: false }
+    const fallback = scoreShadowLiveCohort({ candidates: [input], signalEngine, scoreWeights: SCORE_WEIGHTS })[0]
+    expect(fallback.presentation.growthSource).not.toBe('nowranks-history')
+  })
 })

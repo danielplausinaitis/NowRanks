@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { growthPercentage, trendHeat } from './trendPresentation.mjs'
+import { growthPercentage, resolveGrowthPresentation, trendHeat } from './trendPresentation.mjs'
 
 describe('trend presentation', () => {
   it('maps only complete window-specific component evidence to deterministic heat levels', () => {
@@ -17,5 +17,15 @@ describe('trend presentation', () => {
     expect(growthPercentage({ recentAverage: 18, previousAverage: 0 })).toBeNull()
     expect(growthPercentage({ recentAverage: 18, previousAverage: 4.99 })).toBeNull()
     expect(growthPercentage({ recentAverage: Number.NaN, previousAverage: 10 })).toBeNull()
+  })
+  it('prioritizes calculated NowRanks history, then provider history, over discovery acceleration', () => {
+    expect(resolveGrowthPresentation({ nowranksHistoricalGrowthPercent: 10_902, providerHistoricalGrowthPercent: 4_000, discoveryIncreasePercentage: 1_000 }))
+      .toEqual({ growthPercent: 10_902, growthSource: 'nowranks-history', growthSaturated: false })
+    expect(resolveGrowthPresentation({ providerHistoricalGrowthPercent: 10_902, discoveryIncreasePercentage: 1_000 }))
+      .toEqual({ growthPercent: 10_902, growthSource: 'provider-history', growthSaturated: false })
+  })
+  it('marks an exact 1000% discovery fallback as a saturated lower bound', () => {
+    expect(resolveGrowthPresentation({ discoveryIncreasePercentage: 1_000 }))
+      .toEqual({ growthPercent: 1_000, growthSource: 'discovery-increase', growthSaturated: true })
   })
 })

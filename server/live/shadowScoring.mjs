@@ -1,7 +1,8 @@
 import { diagnoseHistoricalComponents } from './shadowTemporalDiagnostics.mjs'
 import { evaluateElapsedShadowHistory } from './elapsedShadowHistory.mjs'
 import { evaluateColdStartTrending } from './coldStartShadowScoring.mjs'
-import { trendHeat } from './trendPresentation.mjs'
+import { resolveGrowthPresentation, trendHeat } from './trendPresentation.mjs'
+import { boundedDiscoveryAcceleration, composeUnifiedPublicScore, nowScoreFromUnifiedRaw, recencyScore } from './unifiedPublicScoring.mjs'
 
 export const SHADOW_SEARCH_INTEREST_WEIGHTS = Object.freeze({ currentTrendIntensity: 0.7, baselineDemand: 0.3 })
 export const SHADOW_HISTORY_REQUIREMENTS = Object.freeze({ growth: 14, momentum: 14, consistency: 2, breakout: 14 })
@@ -152,6 +153,8 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
     ? elapsedRawShape(candidate, historyWindow)
     : rawShape(candidate, signalEngine))
   const normalizedShape = Object.fromEntries(['growth', 'momentum', 'consistency', 'breakout'].map((component) => [component, normalizeNullable(shapes.map((shape) => shape[component]), signalEngine.normalize)]))
+  const discoveryAcceleration = logNormalizeCohort(candidates.map((candidate) => boundedDiscoveryAcceleration(candidate.currentTrendIntensity?.increasePercentage)), signalEngine.normalize)
+  const referenceTime = candidates.map((candidate) => candidate.currentTrendIntensity?.retrievedAt).filter(Boolean).sort().at(-1) ?? null
 
   const entries = candidates.map((candidate, index) => {
     const searchInterest = currentNormalized[index] === null || baselineNormalized[index] === null
@@ -178,6 +181,25 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
     const scorable = historyWindow ? evidence.eligible : missingComponents.length === 0
     const establishedTrendingScore = scorable ? (historyWindow ? evidence.scores.trending : weightedScore(components, scoreWeights.trending)) : null
     const emergingTrendingScore = emerging?.eligible ? emerging.score : null
+    const unified = composeUnifiedPublicScore({
+      window: historyWindow ?? '24H', currentAttention: currentNormalized[index], baselineDemand: baselineNormalized[index], historicalGrowth: components.growth,
+      discoveryAcceleration: discoveryAcceleration[index], momentum: components.momentum, consistency: components.consistency, breakout: components.breakout,
+      recency: recencyScore({ startedAt: candidate.currentTrendIntensity?.startedAt, retrievedAt: candidate.currentTrendIntensity?.retrievedAt, referenceTime }),
+      historyCoverage,
+    })
+    const evidenceStatus = evidence?.eligible ? 'established' : 'emerging'
+    const unifiedConfidence = evidence?.eligible ? evidence.confidence : 'emerging'
+    const unifiedConfidenceReason = evidence?.eligible ? evidence.confidenceReason : 'current discovery intensity available; historical evidence is incomplete or unavailable'
+    const growthPresentation = resolveGrowthPresentation({
+      // `shadow` observes vault calculations without changing public presentation.
+      nowranksHistoricalGrowthPercent: candidate.vaultGrowthMode === 'preferred' && candidate.vaultGrowth?.promotion?.promotedInPreferred === true
+        ? candidate.vaultGrowth.growthPercent
+        : null,
+      // This comparison is calculated from the current DataForSEO history response. It is
+      // not scheduler-to-scheduler NowRanks history, so retain truthful provenance.
+      providerHistoricalGrowthPercent: shapes[index].diagnostics.components?.growth?.growthPercentage ?? null,
+      discoveryIncreasePercentage: candidate.currentTrendIntensity?.increasePercentage ?? null,
+    })
     const searchInterestDiagnostic = searchInterest !== null
       ? { status: 'available', reason: null }
       : currentNormalized[index] === null
@@ -223,13 +245,26 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
         historicalPeakNormalized: shapes[index].peakNormalizedHistory,
       },
       components,
+      unifiedComponents: unified.components,
+      unifiedAvailableWeight: unified.availableWeight,
+      unifiedAccelerationSource: unified.accelerationSource,
+      unifiedEvidenceMatch: unified.evidenceMatch,
+      unifiedDiscoveryFallbackScale: unified.discoveryFallbackScale,
+      unifiedRawScore: unified.rawScore,
+      nowScore: nowScoreFromUnifiedRaw(unified.rawScore),
+      evidenceStatus,
+      unifiedConfidence: unifiedConfidence,
+      unifiedConfidenceReason,
       presentation: {
-        growthPercent: shapes[index].diagnostics.components?.growth?.growthPercentage ?? null,
+        ...growthPresentation,
+        vaultGrowth: candidate.vaultGrowth
+          ? { status: candidate.vaultGrowth.status, reason: candidate.vaultGrowth.reason, growthPercent: candidate.vaultGrowth.growthPercent, confidence: candidate.vaultGrowth.confidence, comparabilityKey: candidate.vaultGrowth.comparabilityKey ?? null }
+          : null,
         trendHeat: trendHeat({
           growth: components.growth,
           momentum: components.momentum,
           breakout: components.breakout,
-          trendingScore: establishedTrendingScore ?? emergingTrendingScore,
+          trendingScore: unified.rawScore,
         }),
       },
       history: {

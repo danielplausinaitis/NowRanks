@@ -4,6 +4,10 @@
 
 `migrations/004_observation_missing_measurement_reason.sql` is a forward-only update to `observations_check`. It preserves the available-versus-missing value invariant and adds `invalid-provider-measurement` to the closed missing-reason vocabulary used for malformed individual live-provider cells.
 
+`migrations/006_unified_live_snapshot_contract.sql` is a forward-only live-read-model migration written for the confirmed deployed short-window schema. It preserves v1 lane snapshots and adds explicit v2 snapshot versioning plus the future unified public rank, score, and evidence-status fields. It must be applied manually before any v2 snapshot writer is enabled.
+
+`migrations/010_canonical_alignment_gap_diagnostics.sql` is an additive diagnostics migration for the canonical-attention writer. It records the prior canonical gap, overlap-based resume decision, reason, and new-regime decision; it creates no points and must be applied manually before the v2 canonical alignment writer is enabled.
+
 ## Canonical mapping
 
 - `candidates` stores the stable `SearchTopic` identity: ID, display query, normalized query, and category.

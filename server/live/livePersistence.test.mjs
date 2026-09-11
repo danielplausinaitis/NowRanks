@@ -55,33 +55,34 @@ function score(topic, kind) {
     topic, normalizedQuery: topic.toLowerCase(), components: { searchInterest: 70, growth: null, momentum: null, consistency: null, breakout: null },
     componentDiagnostics: { growth: { reason: 'mock' }, momentum: { reason: 'mock' }, consistency: { reason: 'mock' }, breakout: { reason: 'mock' } },
     history: { observationCount: 52, availableCount: kind === 'emerging' ? 4 : 52, coveragePercentage: kind === 'emerging' ? 7.69 : 100 },
+    presentation: { growthPercent: 10_902, growthSource: 'provider-history', growthSaturated: false, trendHeat: 'surging' },
   }
   if (kind === 'established') return {
     ...common, topicClassification: 'established', confidence: 'full', confidenceReason: 'all historical components available',
-    shadowOverallScore: 75, shadowTrendingScore: 80, shadowEmergingTrendingScore: null,
+    evidenceStatus: 'established', unifiedRawScore: 80, nowScore: 90, shadowOverallScore: 75, shadowTrendingScore: 80, shadowEmergingTrendingScore: null,
   }
   if (kind === 'emerging') return {
     ...common, topicClassification: 'possible-new-trend', confidence: 'emerging', confidenceReason: 'active recent sparse trend',
-    shadowOverallScore: null, shadowTrendingScore: null, shadowEmergingTrendingScore: 85,
+    evidenceStatus: 'emerging', unifiedRawScore: 85, nowScore: 92.25, shadowOverallScore: null, shadowTrendingScore: null, shadowEmergingTrendingScore: 85,
   }
   return {
     ...common, topicClassification: 'insufficient-provider-data', confidence: 'insufficient', confidenceReason: 'insufficient evidence',
-    shadowOverallScore: null, shadowTrendingScore: null, shadowEmergingTrendingScore: null,
+    evidenceStatus: 'emerging', unifiedRawScore: null, nowScore: null, shadowOverallScore: null, shadowTrendingScore: null, shadowEmergingTrendingScore: null,
   }
 }
 
-function fixturePlan() {
+function fixturePlan(options = {}) {
   const candidates = [candidate('Established', { apiKey: 'must-not-persist' }), candidate('Emerging'), candidate('Insufficient')]
   return buildLivePersistencePlan({
     cycleId: '2026-09-02T12Z', historyWindow: '1Y', scoredAt: timestamp,
     candidates, volumes: candidates.map(({ query }) => volume(query)), histories: candidates.map(({ query }) => history(query)),
-    scores: [score('Established', 'established'), score('Emerging', 'emerging'), score('Insufficient', 'insufficient')],
+    scores: [score('Established', 'established'), score('Emerging', 'emerging'), score('Insufficient', 'insufficient')], ...options,
   })
 }
 
 function mockRepository({ failSnapshotsOnce = false } = {}) {
   const stores = {
-    runs: new Map(), candidates: new Map(), evidence: new Map(), provenances: new Map(), observations: new Map(), snapshots: new Map(), entries: new Map(),
+    runs: new Map(), candidates: new Map(), evidence: new Map(), provenances: new Map(), observations: new Map(), vaultMeasurements: new Map(), canonicalArtifacts: new Map(), canonicalAlignments: new Map(), canonicalPoints: new Map(), snapshots: new Map(), entries: new Map(),
   }
   let shouldFailSnapshots = failSnapshotsOnce
   return {
@@ -98,6 +99,10 @@ function mockRepository({ failSnapshotsOnce = false } = {}) {
     async upsertLiveEvidence(rows) { rows.forEach((row) => stores.evidence.set(row.evidence_id, row)) },
     async upsertLiveProvenance(rows) { rows.forEach((row) => stores.provenances.set(row.provenance_id, row)) },
     async upsertLiveObservations(rows) { rows.forEach((row) => stores.observations.set(row.observation_id, row)) },
+    async upsertLiveHistoricalVaultMeasurements(rows) { rows.forEach((row) => stores.vaultMeasurements.set(row.measurement_id, row)) },
+    async upsertLiveProviderCurveArtifacts(rows) { rows.forEach((row) => stores.canonicalArtifacts.set(row.artifact_id, row)) },
+    async upsertLiveCanonicalAttentionAlignments(rows) { rows.forEach((row) => stores.canonicalAlignments.set(row.alignment_id, row)) },
+    async upsertLiveCanonicalAttentionPoints(rows) { rows.forEach((row) => stores.canonicalPoints.set(row.point_id, row)) },
     async upsertLiveSnapshot(row) {
       if (shouldFailSnapshots) { shouldFailSnapshots = false; throw new Error('snapshot write failed') }
       stores.snapshots.set(row.snapshot_id, row)
@@ -111,7 +116,7 @@ const fixedNow = () => timestamp
 
 describe('live ingestion safety configuration', () => {
   it('defaults to dry-run with a bounded candidate count and refuses writes by default', () => {
-    expect(resolveLiveIngestionSafetyConfig({}, fixedNow)).toMatchObject({ dryRun: true, candidateLimit: 50, displayLimit: 10, discoveryLimit: 50, initialPaidCandidates: 15, maxPaidCandidates: 50, cycleId: '2026-09-02T12:00Z' })
+    expect(resolveLiveIngestionSafetyConfig({}, fixedNow)).toMatchObject({ dryRun: true, candidateLimit: 50, displayLimit: 20, discoveryLimit: 50, initialPaidCandidates: 15, maxPaidCandidates: 50, cycleId: '2026-09-02T12:00Z' })
     expect(() => assertLiveDatabaseWriteAllowed({})).toThrow(/ALLOW_LIVE_DATABASE_WRITE=true/)
     expect(() => assertLiveDatabaseWriteAllowed({ ALLOW_REPLAY_DATABASE_WRITE: 'true' })).toThrow(/ALLOW_LIVE_DATABASE_WRITE=true/)
   })
@@ -120,6 +125,7 @@ describe('live ingestion safety configuration', () => {
     expect(() => assertLiveDatabaseWriteAllowed(writeEnv)).not.toThrow()
     expect(resolveLiveIngestionSafetyConfig({ LIVE_INGEST_DRY_RUN: 'false', LIVE_INGEST_CANDIDATE_LIMIT: '21' }, fixedNow)).toMatchObject({ candidateLimit: 21, discoveryLimit: 21, initialPaidCandidates: 21, maxPaidCandidates: 21 })
     expect(resolveLiveIngestionSafetyConfig({ LIVE_INGEST_DRY_RUN: 'false', LIVE_INGEST_CANDIDATE_LIMIT: '2' }, fixedNow)).toMatchObject({ dryRun: false, candidateLimit: 2 })
+    expect(() => resolveLiveIngestionSafetyConfig({ LIVE_DISCOVERY_LIMIT: '100', LIVE_MAX_PAID_CANDIDATES: '51' }, fixedNow)).toThrow(/LIVE_MAX_PAID_CANDIDATES.*between 2 and 50/)
   })
 })
 
@@ -159,14 +165,51 @@ describe('live persistence plan', () => {
     expect(plan.observations[0]).toMatchObject({ availability: 'missing', interest_value: null, missing_reason: 'invalid-provider-measurement' })
   })
 
-  it('stores truthful established and emerging snapshot contracts without a unified rank', () => {
+  it('stores a v2 unified public contract without legacy score fields', () => {
     const plan = fixturePlan()
-    const established = plan.snapshotEntries.find((entry) => entry.score_lane === 'established')
-    const emerging = plan.snapshotEntries.find((entry) => entry.score_lane === 'emerging')
-    expect(established).toMatchObject({ overall_score: 75, established_trending_score: 80, emerging_trending_score: null, lane_rank: 1, confidence: 'full', classification: 'established', score_basis: 'historical-trending' })
-    expect(emerging).toMatchObject({ overall_score: null, established_trending_score: null, emerging_trending_score: 85, lane_rank: 1, confidence: 'emerging', classification: 'possible-new-trend', score_basis: 'current-emerging-evidence' })
-    expect(plan.snapshotEntries.every((entry) => !('trending_rank' in entry) && !('unified_rank' in entry))).toBe(true)
-    expect(plan.counts).toMatchObject({ established: 1, emerging: 1, insufficient: 1, snapshotEntries: 2 })
+    expect(plan.snapshot).toMatchObject({ snapshot_format_version: 2 })
+    expect(plan.snapshotEntries).toEqual(expect.arrayContaining([expect.objectContaining({ score_lane: 'unified', score_basis: 'unified-public', lane_rank: null, public_rank: 1, public_score: 92.25, evidence_status: 'emerging', overall_score: null, established_trending_score: null, emerging_trending_score: null })]))
+    expect(plan.snapshotEntries.map((entry) => entry.public_rank)).toEqual([1, 2])
+    expect(plan.counts).toMatchObject({ unified: 2, insufficient: 1, snapshotEntries: 2 })
+  })
+
+  it('writes one idempotent UTC-slot vault artifact per evaluated discovery candidate only when enabled', async () => {
+    const plan = fixturePlan({ vaultConfig: { enabled: true, growthMode: 'shadow', slotMinutes: 240 }, vaultDiscoveryRequest: { geo: 'US', language: 'en', hours: 24 } })
+    expect(plan.vaultMeasurements).toHaveLength(3)
+    expect(plan.vaultMeasurements.every((row) => row.comparability_status === 'unknown' && row.quality.growthEligible === false)).toBe(true)
+    expect(plan.vaultMeasurements.map((row) => row.slot_at)).toEqual([timestamp, timestamp, timestamp])
+    const repository = mockRepository()
+    await persistLivePlan({ plan, repository, env: writeEnv, now: fixedNow })
+    expect(repository.stores.vaultMeasurements.size).toBe(3)
+  })
+
+  it('writes the raw 24H curve before its alignment and immutable canonical points only in shadow/preferred modes', async () => {
+    const canonicalHistory = {
+      ...history('Established'), historyRequest: { timeRange: 'past_day' },
+      observations: [0, 4, 8, 12].map((hour, index) => ({ candidateId: 'dataforseo-trends:established', date: '2026-09-02', observedAt: `2026-09-02T${String(hour).padStart(2, '0')}:00:00.000Z`, availability: 'available', interest: (index + 1) * 10 })),
+    }
+    const plan = buildLivePersistencePlan({ cycleId: 'canonical-shadow', historyWindow: '24H', scoredAt: timestamp, candidates: [candidate('Established')], volumes: [volume('Established')], histories: [canonicalHistory], scores: [score('Established', 'established')], vaultConfig: { enabled: true, growthMode: 'shadow', slotMinutes: 240 } })
+    expect(plan.canonicalAttention.diagnostics).toMatchObject({ bootstrapped: 1, newPoints: 4 })
+    const repository = mockRepository()
+    await persistLivePlan({ plan, repository, env: writeEnv, now: fixedNow })
+    expect(repository.stores.canonicalArtifacts.size).toBe(1)
+    expect(repository.stores.canonicalAlignments.size).toBe(1)
+    expect(repository.stores.canonicalPoints.size).toBe(4)
+    const off = buildLivePersistencePlan({ cycleId: 'canonical-off', historyWindow: '24H', scoredAt: timestamp, candidates: [candidate('Established')], volumes: [volume('Established')], histories: [canonicalHistory], scores: [score('Established', 'established')], vaultConfig: { enabled: true, growthMode: 'off', slotMinutes: 240 } })
+    expect(off.canonicalAttention.artifacts).toHaveLength(0)
+  })
+
+  it('persists final growth source metadata with the same value supplied to the reader', () => {
+    const entry = fixturePlan().snapshotEntries.find((item) => item.candidate_id.includes('established'))
+    expect(entry.component_availability.presentation).toEqual({ growthPercent: 10_902, growthSource: 'provider-history', growthSaturated: false, vaultGrowth: null, trendHeat: 'surging' })
+  })
+
+  it('supports a full public Top 20 with sequential unified ranks', () => {
+    const candidates = Array.from({ length: 20 }, (_, index) => candidate(`Topic ${index + 1}`))
+    const scores = candidates.map((item, index) => ({ ...score(item.query, 'established'), unifiedRawScore: 100 - index, nowScore: 99 - index * .45 }))
+    const plan = buildLivePersistencePlan({ cycleId: 'top-20', historyWindow: '7D', scoredAt: timestamp, candidates, volumes: candidates.map(({ query }) => volume(query)), histories: [], scores })
+    expect(plan.snapshotEntries).toHaveLength(20)
+    expect(plan.snapshotEntries.map((entry) => entry.public_rank)).toEqual(Array.from({ length: 20 }, (_, index) => index + 1))
   })
 
   it('dry-run returns a complete plan summary and performs zero repository writes', async () => {

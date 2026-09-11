@@ -1,5 +1,7 @@
 import { formatErrorDiagnostics } from '../ingestion/errorDiagnostics.mjs'
 import { DEFAULT_INGESTION_STALE_AFTER_MINUTES, DEFAULT_OBSERVATION_UPSERT_BATCH_SIZE, stableUuid } from '../ingestion/persistence.mjs'
+import { buildDiscoveryVaultMeasurements, resolveHistoricalVaultConfig, utcSchedulerSlot } from './historicalVault.mjs'
+import { buildCanonicalAttentionPersistencePlan } from './canonicalAttentionPersistence.mjs'
 
 export const ALLOW_LIVE_DATABASE_WRITE_ENV = 'ALLOW_LIVE_DATABASE_WRITE'
 export const LIVE_INGEST_DRY_RUN_ENV = 'LIVE_INGEST_DRY_RUN'
@@ -12,10 +14,11 @@ export const LIVE_INGEST_CYCLE_ID_ENV = 'LIVE_INGEST_CYCLE_ID'
 export const LIVE_INGEST_RECOVER_STALE_ENV = 'LIVE_INGEST_RECOVER_STALE'
 export const DEFAULT_LIVE_INGEST_CANDIDATE_LIMIT = 10
 export const LIVE_INGEST_CANDIDATE_LIMIT_RANGE = Object.freeze({ minimum: 2, maximum: 100 })
-export const DEFAULT_LIVE_DISPLAY_LIMIT = 10
+export const DEFAULT_LIVE_DISPLAY_LIMIT = 20
 export const DEFAULT_LIVE_DISCOVERY_LIMIT = 50
 export const DEFAULT_LIVE_INITIAL_PAID_CANDIDATES = 15
 export const DEFAULT_LIVE_MAX_PAID_CANDIDATES = 50
+export const LIVE_MAX_PAID_CANDIDATES_HARD_LIMIT = 50
 
 function booleanValue(value, name, defaultValue) {
   if (value === undefined || value === '') return defaultValue
@@ -43,7 +46,7 @@ export function resolveLiveIngestionSafetyConfig(env = process.env, now = () => 
   const displayLimit = boundedInteger(env[LIVE_DISPLAY_LIMIT_ENV], LIVE_DISPLAY_LIMIT_ENV, DEFAULT_LIVE_DISPLAY_LIMIT)
   const discoveryLimit = boundedInteger(env[LIVE_DISCOVERY_LIMIT_ENV], LIVE_DISCOVERY_LIMIT_ENV, legacyLimit === undefined || legacyLimit === '' ? DEFAULT_LIVE_DISCOVERY_LIMIT : legacyLimit)
   const initialPaidCandidates = boundedInteger(env[LIVE_INITIAL_PAID_CANDIDATES_ENV], LIVE_INITIAL_PAID_CANDIDATES_ENV, legacyLimit === undefined || legacyLimit === '' ? DEFAULT_LIVE_INITIAL_PAID_CANDIDATES : legacyLimit)
-  const maxPaidCandidates = boundedInteger(env[LIVE_MAX_PAID_CANDIDATES_ENV], LIVE_MAX_PAID_CANDIDATES_ENV, legacyLimit === undefined || legacyLimit === '' ? DEFAULT_LIVE_MAX_PAID_CANDIDATES : legacyLimit)
+  const maxPaidCandidates = boundedInteger(env[LIVE_MAX_PAID_CANDIDATES_ENV], LIVE_MAX_PAID_CANDIDATES_ENV, legacyLimit === undefined || legacyLimit === '' ? DEFAULT_LIVE_MAX_PAID_CANDIDATES : legacyLimit, { minimum: 2, maximum: LIVE_MAX_PAID_CANDIDATES_HARD_LIMIT })
   if (initialPaidCandidates > maxPaidCandidates) throw new Error(`${LIVE_INITIAL_PAID_CANDIDATES_ENV} must not exceed ${LIVE_MAX_PAID_CANDIDATES_ENV}`)
   if (maxPaidCandidates > discoveryLimit) throw new Error(`${LIVE_MAX_PAID_CANDIDATES_ENV} must not exceed ${LIVE_DISCOVERY_LIMIT_ENV}`)
   const cycleId = env[LIVE_INGEST_CYCLE_ID_ENV]?.trim() || defaultCycleId(now())
@@ -76,7 +79,7 @@ function candidateKey(normalizedQuery) {
 }
 
 export function liveIngestionIdentity({ cycleId, historyWindow }) {
-  return { runId: stableUuid(`live-ingestion-run:${cycleId}:${historyWindow}:v1`), idempotencyKey: `live:serpapi-dataforseo:${cycleId}:${historyWindow}:v1` }
+  return { runId: stableUuid(`live-ingestion-run:${cycleId}:${historyWindow}:v2`), idempotencyKey: `live:serpapi-dataforseo:${cycleId}:${historyWindow}:v2` }
 }
 
 function evidenceRow({ runId, candidateId, providerId, kind, observedAt, retrievedAt, geographicScope, availability, payload }) {
@@ -112,12 +115,15 @@ function componentAvailability(entry) {
     }])),
     presentation: {
       growthPercent: entry.presentation?.growthPercent ?? null,
+      growthSource: entry.presentation?.growthSource ?? 'unavailable',
+      growthSaturated: entry.presentation?.growthSaturated === true,
+      vaultGrowth: entry.presentation?.vaultGrowth ?? null,
       trendHeat: entry.presentation?.trendHeat ?? null,
     },
   }
 }
 
-export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, candidates, volumes, histories, scores, displayLimit = DEFAULT_LIVE_DISPLAY_LIMIT }) {
+export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, candidates, volumes, histories, scores, displayLimit = DEFAULT_LIVE_DISPLAY_LIMIT, vaultConfig = resolveHistoricalVaultConfig(), vaultDiscoveryRequest = {}, canonicalExistingByQuery = new Map(), canonicalTargeting = {} }) {
   if (!cycleId || !historyWindow || Number.isNaN(Date.parse(scoredAt))) throw new Error('Live persistence plan requires cycle, window, and scored timestamp')
   if (![candidates, volumes, histories, scores].every(Array.isArray)) throw new Error('Live persistence plan inputs must be arrays')
   const { runId, idempotencyKey } = liveIngestionIdentity({ cycleId, historyWindow })
@@ -133,14 +139,19 @@ export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, can
   const evidence = []
   const provenances = []
   const observations = []
+  const discoveryEvidenceIdByQuery = new Map()
 
   for (const candidate of candidates) {
     const candidateId = candidateIdByQuery.get(candidate.normalizedQuery)
-    evidence.push(evidenceRow({
-      runId, candidateId, providerId: candidate.providerId, kind: 'discovery',
-      observedAt: candidate.startedAt ?? candidate.retrievedAt, retrievedAt: candidate.retrievedAt,
-      geographicScope: candidate.geographicScope, availability: 'available', payload: candidate,
-    }))
+    if (!candidate.trackingOnly) {
+      const discoveryEvidence = evidenceRow({
+        runId, candidateId, providerId: candidate.providerId, kind: 'discovery',
+        observedAt: candidate.startedAt ?? candidate.retrievedAt, retrievedAt: candidate.retrievedAt,
+        geographicScope: candidate.geographicScope, availability: 'available', payload: candidate,
+      })
+      evidence.push(discoveryEvidence)
+      discoveryEvidenceIdByQuery.set(candidate.normalizedQuery, discoveryEvidence.evidence_id)
+    }
     const volume = volumeByQuery.get(candidate.normalizedQuery)
     if (volume) evidence.push(evidenceRow({
       runId, candidateId, providerId: volume.providerId, kind: 'baseline-demand',
@@ -185,26 +196,37 @@ export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, can
     }
   }
 
-  const snapshotId = stableUuid(`live-snapshot:${cycleId}:${historyWindow}`)
+  const vaultMeasurements = vaultConfig.enabled
+    ? buildDiscoveryVaultMeasurements({
+      candidates: candidates.filter((candidate) => !candidate.trackingOnly), candidateIdByQuery, discoveryRequest: vaultDiscoveryRequest, ingestionRunId: runId,
+      sourceEvidenceIdByQuery: discoveryEvidenceIdByQuery, slotAt: utcSchedulerSlot(scoredAt, vaultConfig.slotMinutes), retrievedAt: scoredAt,
+    })
+    : []
+  // Canonical attention is deliberately limited to DataForSEO's high-resolution past_day curve.
+  // The other requested history windows stay on the established provider-history path.
+  const canonicalAttention = vaultConfig.enabled && vaultConfig.growthMode !== 'off' && historyWindow === '24H'
+    ? buildCanonicalAttentionPersistencePlan({ histories, candidateIdByQuery, existingByQuery: canonicalExistingByQuery, runId, scoredAt, slotMinutes: vaultConfig.slotMinutes, canonicalTargeting })
+    : { artifacts: [], alignments: [], points: [], diagnostics: { eligibleCandidates: 0, bootstrapped: 0, aligned: 0, rejected: 0, rejectionReasons: {}, rawArtifacts: 0, newPoints: 0, failures: 0 } }
+
+  const snapshotId = stableUuid(`live-snapshot:v2:${cycleId}:${historyWindow}`)
   if (!Number.isInteger(displayLimit) || displayLimit < 1) throw new Error('Live persistence displayLimit must be a positive integer')
-  // Scores are never compared across the Established and Emerging lanes. Established retains
-  // its independent order; Emerging fills any remaining display slots in its own order.
-  const established = rankScores(scores, 'shadowTrendingScore', displayLimit)
-  const emerging = rankScores(scores, 'shadowEmergingTrendingScore', Math.max(0, displayLimit - established.length))
-  const snapshotEntries = [...established.map(({ entry, rank }) => ({ entry, rank, lane: 'established' })), ...emerging.map(({ entry, rank }) => ({ entry, rank, lane: 'emerging' }))]
-    .map(({ entry, rank, lane }) => ({
-      snapshot_entry_id: stableUuid(`live-snapshot-entry:${snapshotId}:${entry.normalizedQuery}:${lane}`),
+  const unified = rankScores(scores, 'unifiedRawScore', displayLimit)
+  const snapshotEntries = unified.map(({ entry, rank }) => ({
+      snapshot_entry_id: stableUuid(`live-snapshot-entry:${snapshotId}:${entry.normalizedQuery}:unified`),
       snapshot_id: snapshotId,
       candidate_id: candidateIdByQuery.get(entry.normalizedQuery),
-      score_lane: lane,
-      classification: entry.topicClassification,
-      confidence: entry.confidence,
-      confidence_reason: entry.confidenceReason,
-      score_basis: lane === 'established' ? 'historical-trending' : 'current-emerging-evidence',
-      overall_score: lane === 'established' ? entry.shadowOverallScore : null,
-      established_trending_score: lane === 'established' ? entry.shadowTrendingScore : null,
-      emerging_trending_score: lane === 'emerging' ? entry.shadowEmergingTrendingScore : null,
-      lane_rank: rank,
+      score_lane: 'unified',
+      classification: entry.evidenceStatus === 'established' ? (entry.topicClassification === 'partial-history' ? 'partial-history' : 'established') : 'possible-new-trend',
+      confidence: entry.unifiedConfidence ?? (entry.evidenceStatus === 'established' ? entry.confidence : 'emerging'),
+      confidence_reason: entry.unifiedConfidenceReason ?? entry.confidenceReason,
+      score_basis: 'unified-public',
+      overall_score: null,
+      established_trending_score: null,
+      emerging_trending_score: null,
+      lane_rank: null,
+      public_rank: rank,
+      public_score: entry.nowScore,
+      evidence_status: entry.evidenceStatus,
       history_observation_count: entry.history.observationCount,
       history_available_count: entry.history.availableCount,
       history_coverage_percentage: entry.history.coveragePercentage,
@@ -219,18 +241,24 @@ export function buildLivePersistencePlan({ cycleId, historyWindow, scoredAt, can
     evidence,
     provenances,
     observations,
-    snapshot: { snapshot_id: snapshotId, ingestion_run_id: runId, cycle_id: cycleId, data_mode: 'live', selected_window: historyWindow, scored_at: scoredAt },
+    vaultMeasurements,
+    canonicalAttention,
+    snapshot: { snapshot_id: snapshotId, ingestion_run_id: runId, cycle_id: cycleId, data_mode: 'live', selected_window: historyWindow, scored_at: scoredAt, snapshot_format_version: 2 },
     snapshotEntries,
     counts: {
       candidates: candidateRows.length,
       evidence: evidence.length,
       provenances: provenances.length,
       observations: observations.length,
+      vaultMeasurements: vaultMeasurements.length,
+      canonicalArtifacts: canonicalAttention.artifacts.length,
+      canonicalAlignments: canonicalAttention.alignments.length,
+      canonicalPoints: canonicalAttention.points.length,
+      canonicalAttention: canonicalAttention.diagnostics,
       snapshots: 1,
       snapshotEntries: snapshotEntries.length,
-      established: established.length,
-      emerging: emerging.length,
-      insufficient: scores.length - established.length - emerging.length,
+      unified: unified.length,
+      insufficient: scores.length - unified.length,
     },
   }
 }
@@ -248,6 +276,8 @@ export function summarizeLiveDryRun(plan, requestMetrics = {}) {
     baselineCache: requestMetrics.baselineCache ?? null,
     graphMeasurements: requestMetrics.graphMeasurements ?? null,
     evaluation: requestMetrics.evaluation ?? null,
+    vault: requestMetrics.vault ?? null,
+    tracking: requestMetrics.tracking ?? null,
   }
 }
 
@@ -302,11 +332,23 @@ export async function persistLivePlan({
       accepted += batch.length
       onProgress?.({ stage: 'observations', completed: accepted, total: plan.observations.length })
     }
+    if (plan.vaultMeasurements.length) {
+      onProgress?.('historical vault')
+      await repository.upsertLiveHistoricalVaultMeasurements(plan.vaultMeasurements.map(resolveCandidate))
+    }
+    if (plan.canonicalAttention.artifacts.length) {
+      onProgress?.('canonical attention artifacts')
+      await repository.upsertLiveProviderCurveArtifacts(plan.canonicalAttention.artifacts.map(resolveCandidate))
+      onProgress?.('canonical attention alignments')
+      await repository.upsertLiveCanonicalAttentionAlignments(plan.canonicalAttention.alignments.map(resolveCandidate))
+      onProgress?.('canonical attention points')
+      await repository.upsertLiveCanonicalAttentionPoints(plan.canonicalAttention.points.map(resolveCandidate))
+    }
     onProgress?.('snapshots')
     await repository.upsertLiveSnapshot(plan.snapshot)
     await repository.upsertLiveSnapshotEntries(plan.snapshotEntries.map(resolveCandidate))
     const finishedAt = now()
-    const total = plan.counts.evidence + plan.counts.observations + plan.counts.snapshotEntries
+    const total = plan.counts.evidence + plan.counts.observations + plan.counts.vaultMeasurements + plan.counts.canonicalArtifacts + plan.counts.canonicalAlignments + plan.counts.canonicalPoints + plan.counts.snapshotEntries
     await repository.updateRun(plan.runId, { status: 'succeeded', finished_at: finishedAt, records_received: total, records_accepted: total, records_rejected: 0, error_summary: null })
     onProgress?.('completion')
     return { status: 'succeeded', runId: plan.runId, ...plan.counts }

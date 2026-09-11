@@ -13,7 +13,7 @@ function leaderboardResult({ window = '7D', mode = 'overall', category } = {}) {
 function setup({ reject } = {}) {
   const leaderboardService = { getLeaderboard: reject ? vi.fn().mockRejectedValue(reject) : vi.fn(async (request) => leaderboardResult(request)) }
   const logger = { error: vi.fn() }
-  return { handler: createApiHandler({ leaderboardService, logger }), leaderboardService, logger }
+  return { handler: createApiHandler({ dataSource: 'replay', leaderboardService, logger }), leaderboardService, logger }
 }
 
 function liveResult() {
@@ -60,6 +60,12 @@ describe('read-only leaderboard HTTP API handler', () => {
     expect(leaderboardService.getLeaderboard).toHaveBeenCalledWith(expect.objectContaining({ window }))
   })
 
+  it('defaults an omitted leaderboard window to 24H', async () => {
+    const { handler, leaderboardService } = setup()
+    await response(handler, '/api/leaderboard')
+    expect(leaderboardService.getLeaderboard).toHaveBeenCalledWith(expect.objectContaining({ window: '24H' }))
+  })
+
   it('keeps 30D and 1Y metadata distinct in API responses', async () => {
     const leaderboardService = {
       getLeaderboard: vi.fn(async ({ window, mode }) => ({
@@ -70,7 +76,7 @@ describe('read-only leaderboard HTTP API handler', () => {
         entries: [{ id: `google:${window}`, rank: 1, topic: window, category: 'Technology', overallScore: window === '30D' ? 77.6 : 81.83, trendingScore: 0, movement: { status: 'unchanged', delta: 0, previousRank: 1 } }],
       })),
     }
-    const handler = createApiHandler({ leaderboardService, logger: { error: vi.fn() } })
+    const handler = createApiHandler({ dataSource: 'replay', leaderboardService, logger: { error: vi.fn() } })
     const thirtyDay = await response(handler, '/api/leaderboard?window=30D')
     const year = await response(handler, '/api/leaderboard?window=1Y')
     expect(thirtyDay.json.metadata).toMatchObject({ window: '30D', observedFrom: '2026-07-27' })
@@ -150,6 +156,13 @@ describe('read-only leaderboard HTTP API handler', () => {
     expect(result.body).not.toMatch(/replay|unified.*rank/i)
   })
 
+  it('requests the default 24H persisted live snapshot when window is omitted', async () => {
+    const liveLeaderboardRead = vi.fn(async () => liveResult())
+    const handler = createApiHandler({ dataSource: 'live', liveLeaderboardRead, logger: { error: vi.fn() } })
+    await response(handler, '/api/leaderboard')
+    expect(liveLeaderboardRead).toHaveBeenCalledWith({ selectedWindow: '24H' })
+  })
+
   it('makes live Overall Established-only and keeps Emerging scores unavailable', async () => {
     const handler = createApiHandler({ dataSource: 'live', liveLeaderboardRead: vi.fn(async () => liveResult()), logger: { error: vi.fn() } })
     const result = await response(handler, '/api/leaderboard?window=1Y&mode=overall')
@@ -165,6 +178,18 @@ describe('read-only leaderboard HTTP API handler', () => {
     expect(result.json.established.map((entry) => entry.laneRank)).toEqual([2])
     expect(result.json.emerging.map((entry) => entry.laneRank)).toEqual([2])
     expect(result.json.established[0].movement).toEqual({ state: 'unavailable', delta: null, previousRank: null })
+  })
+
+  it('serves a unified snapshot as one entries array with preserved public ranks', async () => {
+    const unified = {
+      rankingMode: 'unified', snapshot: { cycleId: 'cycle-unified', selectedWindow: '24H', scoredAt: '2026-09-04T00:00:00.000Z', snapshotFormatVersion: 2 }, compatibility: { status: 'supported', diagnostics: [] },
+      entries: [{ ...liveResult().established[0], publicRank: 2, publicScore: 86, evidenceStatus: 'emerging', growthPercent: 184, growthSource: 'provider-history', scoreLane: undefined, laneRank: undefined }],
+    }
+    const handler = createApiHandler({ dataSource: 'live', liveLeaderboardRead: vi.fn(async () => unified), logger: { error: vi.fn() } })
+    const result = await response(handler, '/api/leaderboard?window=24H&category=Technology')
+    expect(result.json).toMatchObject({ dataMode: 'live', rankingMode: 'unified', window: '24H', metadata: { categoryRankSemantics: 'persisted-global-public-rank-not-reranked' }, entries: [expect.objectContaining({ publicRank: 2, publicScore: 86, evidenceStatus: 'emerging', growthPercent: 184, growthSource: 'provider-history' })] })
+    expect(result.json.established).toBeUndefined()
+    expect(result.json.emerging).toBeUndefined()
   })
 
   it('returns an explicit 404 for a missing live snapshot with no replay fallback', async () => {

@@ -30,6 +30,20 @@ export function growthPercentage({ recentAverage, previousAverage, minimumPrevio
   return Number.isFinite(percentage) ? percentage : null
 }
 
+/**
+ * Presentation has a stricter source order than scoring: a calculated comparison over
+ * valid history always wins over discovery's coarse increase field. SerpApi's exact
+ * 1000% value is treated as a saturated lower bound, not a precise measurement.
+ */
+export function resolveGrowthPresentation({ nowranksHistoricalGrowthPercent = null, providerHistoricalGrowthPercent = null, discoveryIncreasePercentage = null }) {
+  if (Number.isFinite(nowranksHistoricalGrowthPercent)) return { growthPercent: nowranksHistoricalGrowthPercent, growthSource: 'nowranks-history', growthSaturated: false }
+  if (Number.isFinite(providerHistoricalGrowthPercent)) return { growthPercent: providerHistoricalGrowthPercent, growthSource: 'provider-history', growthSaturated: false }
+  if (Number.isFinite(discoveryIncreasePercentage)) {
+    return { growthPercent: discoveryIncreasePercentage, growthSource: 'discovery-increase', growthSaturated: discoveryIncreasePercentage === 1000 }
+  }
+  return { growthPercent: null, growthSource: 'unavailable', growthSaturated: false }
+}
+
 export function isTrendHeat(value) {
   return value === null || HEAT_LEVELS.includes(value)
 }

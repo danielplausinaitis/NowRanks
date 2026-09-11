@@ -27,11 +27,23 @@ function series(count, intervalHours, missing = new Set()) {
   }))
 }
 
-function score(history, historyWindow) {
+function valuedSeries(values, intervalHours, missing = new Set()) {
+  const start = Date.UTC(2025, 0, 1)
+  return values.map((interest, index) => ({
+    candidateId: 'topic',
+    date: new Date(start + index * intervalHours * HOUR).toISOString().slice(0, 10),
+    observedAt: new Date(start + index * intervalHours * HOUR).toISOString(),
+    ...(missing.has(index)
+      ? { availability: 'missing', interest: null, missingReason: 'out-of-range' }
+      : { availability: 'available', interest }),
+  }))
+}
+
+function score(history, historyWindow, increasePercentage = undefined) {
   return scoreElapsedTimeShadowLiveCohort({
     candidates: [{
       topic: 'Topic', normalizedQuery: 'topic', category: 'Technology',
-      currentTrendIntensity: { providerId: 'serpapi', searchVolume: 10_000 },
+      currentTrendIntensity: { providerId: 'serpapi', searchVolume: 10_000, increasePercentage },
       baselineDemand: { providerId: 'dataforseo-volume', availability: 'available', searchVolume: 5_000 },
       historicalTrendShape: { providerId: 'dataforseo-trends', observations: history },
     }],
@@ -122,5 +134,30 @@ describe('elapsed-time live shadow history', () => {
     expect(normalized[0].interest).toBeCloseTo(10 / 12 * 100)
     expect(normalized[1]).toMatchObject({ availability: 'missing', interest: null })
     expect(normalized[2].interest).toBe(100)
+  })
+
+  it('calculates uncapped 24H and 7D percentages from their independent raw observation windows', () => {
+    const hourly = valuedSeries([...Array(7).fill(5), ...Array(7).fill(129)], 1)
+    const daily = valuedSeries([...Array(3).fill(5), ...Array(3).fill(20.6)], 24)
+    const hourlyEvaluation = evaluateElapsedShadowHistory(hourly, '24H', analyzeObservationTimeline(hourly))
+    const dailyEvaluation = evaluateElapsedShadowHistory(daily, '7D', analyzeObservationTimeline(daily))
+    expect(hourlyEvaluation.components.growth.growthPercentage).toBeCloseTo(2480)
+    expect(dailyEvaluation.components.growth.growthPercentage).toBeCloseTo(312)
+    expect(hourlyEvaluation.components.growth.growthPercentage).not.toBe(dailyEvaluation.components.growth.growthPercentage)
+  })
+
+  it('uses valid provider history instead of a saturated discovery fallback', () => {
+    const history = valuedSeries([...Array(7).fill(5), ...Array(7).fill(550.1)], 1)
+    const result = score(history, '24H', 1_000)
+    expect(result.presentation).toEqual(expect.objectContaining({ growthPercent: expect.closeTo(10_902), growthSource: 'provider-history', growthSaturated: false }))
+  })
+
+  it('withholds the percentage when the denominator or required daily coverage is invalid', () => {
+    const nearZero = valuedSeries([...Array(3).fill(4.99), ...Array(3).fill(100)], 24)
+    const missing = valuedSeries([...Array(3).fill(5), ...Array(3).fill(100)], 24, new Set([1]))
+    const nearZeroEvaluation = evaluateElapsedShadowHistory(nearZero, '7D', analyzeObservationTimeline(nearZero))
+    const missingEvaluation = evaluateElapsedShadowHistory(missing, '7D', analyzeObservationTimeline(missing))
+    expect(nearZeroEvaluation.components.growth.growthPercentage).toBeNull()
+    expect(missingEvaluation.components.growth).toMatchObject({ status: 'unavailable', reason: 'insufficient-baseline-coverage', growthPercentage: null })
   })
 })

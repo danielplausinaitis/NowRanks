@@ -191,6 +191,7 @@ export function evaluateElapsedShadowHistory(observations, window, timeline) {
   if (!definition) throw new Error(`Unsupported shadow history window: ${window}`)
   const normalized = peakNormalizeAvailableHistory(observations)
   const points = sortedUnique(normalized)
+  const rawPoints = sortedUnique(observations)
   if (points.length === 0) {
     const empty = unavailable('no-observations')
     return { normalizedHistory: normalized, components: { growth: empty, momentum: empty, consistency: empty, breakout: empty } }
@@ -203,13 +204,22 @@ export function evaluateElapsedShadowHistory(observations, window, timeline) {
   const end = lastTimestamp + definition.cadenceMs
   const windowStart = end - definition.windowMs
   const windowPoints = points.filter(({ timestamp }) => timestamp >= windowStart && timestamp < end)
+  const rawWindowPoints = rawPoints.filter(({ timestamp }) => timestamp >= windowStart && timestamp < end)
+  const components = {
+    growth: growthComponent(windowPoints, end, definition),
+    momentum: momentumComponent(windowPoints, end, definition),
+    consistency: consistencyComponent(windowPoints, definition),
+    breakout: breakoutComponent(windowPoints, end, definition),
+  }
+  // Scores retain the existing peak-normalized calculation. The displayed percentage is
+  // calculated separately from the equivalent raw provider observations so it reflects
+  // the real comparable means rather than a presentation-scale artifact.
+  const rawGrowth = growthComponent(rawWindowPoints, end, definition)
   return {
     normalizedHistory: normalized,
     components: {
-      growth: growthComponent(windowPoints, end, definition),
-      momentum: momentumComponent(windowPoints, end, definition),
-      consistency: consistencyComponent(windowPoints, definition),
-      breakout: breakoutComponent(windowPoints, end, definition),
+      ...components,
+      growth: { ...components.growth, growthPercentage: rawGrowth.growthPercentage ?? null },
     },
   }
 }
