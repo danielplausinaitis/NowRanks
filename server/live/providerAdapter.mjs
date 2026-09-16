@@ -1,10 +1,10 @@
 import { CATEGORIES } from '../../shared/categories.mjs'
 import { formatErrorDiagnostics } from '../ingestion/errorDiagnostics.mjs'
+import { isCrossQueryComparabilityStatus } from './provenanceComparability.mjs'
 
 const CATEGORY_SET = new Set(CATEGORIES)
 export const LIVE_MISSING_REASONS = Object.freeze(['not-reported', 'source-unavailable', 'out-of-range', 'redacted', 'invalid-provider-measurement'])
 const MISSING_REASONS = new Set(LIVE_MISSING_REASONS)
-const COMPARABILITY_STATUSES = new Set(['comparable', 'not-comparable', 'unknown'])
 
 function requireText(value, label) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`Live provider response ${label} is required`)
@@ -56,7 +56,7 @@ export function createLiveTrendProviderAdapter({ providerId, mapCategory = (valu
       const sourceObservedAt = requireTimestamp(payload.sourceObservedAt, 'sourceObservedAt')
       const ingestedAt = requireTimestamp(retrievedAt, 'retrievedAt')
       if (!payload.geographicScope || typeof payload.geographicScope !== 'object') throw new Error('Live provider response geographicScope is required')
-      if (!COMPARABILITY_STATUSES.has(payload.crossQueryComparability?.status)) throw new Error('Live provider response must explicitly declare cross-query comparability')
+      if (!isCrossQueryComparabilityStatus(payload.crossQueryComparability?.status)) throw new Error('Live provider response must explicitly declare cross-query comparability')
       if (!Array.isArray(payload.topics) || payload.topics.length === 0) throw new Error('Live provider response must include at least one topic')
 
       const seenCandidates = new Set()

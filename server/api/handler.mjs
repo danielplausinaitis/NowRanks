@@ -37,7 +37,7 @@ function liveEntry(entry) {
     establishedTrendingScore: entry.establishedTrendingScore, emergingTrendingScore: entry.emergingTrendingScore,
     historyObservationCount: entry.historyObservationCount, historyAvailableCount: entry.historyAvailableCount,
     historyCoveragePercentage: entry.historyCoveragePercentage, searchInterest: entry.searchInterest,
-    componentAvailability: entry.componentAvailability, growthPercent: entry.growthPercent, growthSource: entry.growthSource, growthSaturated: entry.growthSaturated, trendHeat: entry.trendHeat, scoredAt: entry.scoredAt, cycleId: entry.cycleId, selectedWindow: entry.selectedWindow, movement: entry.movement,
+    componentAvailability: entry.componentAvailability, growthPercent: entry.growthPercent, growthSource: entry.growthSource, growthSaturated: entry.growthSaturated, trendHeat: entry.trendHeat, heatStatus: entry.heatStatus, heatLevel: entry.heatLevel, heatEvidenceAvailable: entry.heatEvidenceAvailable, heatEvidenceSource: entry.heatEvidenceSource, heatFallbackUsed: entry.heatFallbackUsed, heatPendingReason: entry.heatPendingReason, scoredAt: entry.scoredAt, cycleId: entry.cycleId, selectedWindow: entry.selectedWindow, movement: entry.movement,
     publicRank: entry.publicRank ?? null, publicScore: entry.publicScore ?? null, evidenceStatus: entry.evidenceStatus ?? null,
   }
 }

@@ -74,6 +74,11 @@ describe('elapsed-time live shadow history', () => {
     }
   })
 
+  it('derives non-pending Heat from valid 7D daily provider shape evidence', () => {
+    const result = score(series(7, 24), '7D')
+    expect(result.presentation).toMatchObject({ trendHeat: expect.any(String), heatDiagnostics: { heatStatus: 'available', heatEvidenceAvailable: true, heatEvidenceSource: 'historical-shape', heatFallbackUsed: false, heatPendingReason: null } })
+  })
+
   it('scores partial-but-sufficient 24H history under the explicit segment threshold', () => {
     const result = score(series(24, 1, new Set([0, 1, 2])), '24H')
     expect(SHADOW_HISTORY_SEGMENT_COVERAGE).toBe(0.8)

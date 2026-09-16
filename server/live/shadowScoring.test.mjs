@@ -82,5 +82,22 @@ describe('shadow live scoring', () => {
     input.vaultGrowth.promotion = { promotedInPreferred: false }
     const fallback = scoreShadowLiveCohort({ candidates: [input], signalEngine, scoreWeights: SCORE_WEIGHTS })[0]
     expect(fallback.presentation.growthSource).not.toBe('nowranks-history')
+    expect(fallback.presentation.growthDiagnostics).toMatchObject({ availability: true, fallbackReason: expect.any(String) })
+  })
+
+  it('emits Heat from valid current discovery acceleration when 24H historical shape evidence is unavailable', () => {
+    const input = candidate('Short Heat', 100, 1000, [20, 30, 40])
+    const result = scoreShadowLiveCohort({ candidates: [input], signalEngine, scoreWeights: SCORE_WEIGHTS, historyWindow: '24H' })[0]
+    expect(result.presentation.trendHeat).not.toBeNull()
+    expect(result.presentation.growthDiagnostics).toMatchObject({ value: 500, availability: true, source: 'discovery-increase', saturation: false })
+  })
+  it('uses current intensity for 24H and 7D Heat when provider history and discovery acceleration are unavailable', () => {
+    const currentOnly = candidate('Current Heat', 100, 1000, [])
+    currentOnly.currentTrendIntensity.increasePercentage = null
+    const day = scoreShadowLiveCohort({ candidates: [currentOnly], signalEngine, scoreWeights: SCORE_WEIGHTS, historyWindow: '24H' })[0]
+    const week = scoreShadowLiveCohort({ candidates: [currentOnly], signalEngine, scoreWeights: SCORE_WEIGHTS, historyWindow: '7D' })[0]
+    expect(day.presentation.heatDiagnostics).toMatchObject({ heatStatus: 'available', heatEvidenceSource: 'current-intensity', heatFallbackUsed: true, heatPendingReason: null })
+    expect(week.presentation.heatDiagnostics).toMatchObject({ heatStatus: 'available', heatEvidenceSource: 'current-intensity', heatFallbackUsed: true, heatPendingReason: null })
+    expect(day.presentation.trendHeat).toBe('rising')
   })
 })

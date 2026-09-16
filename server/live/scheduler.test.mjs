@@ -1,31 +1,23 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createIngestionRunSlotGuard, createLiveSchedulerController, FIXED_UTC_SLOT_HOURS, nextUtcSchedulerSlot, runScheduledOnce, schedulePlan, schedulerCycleId, schedulerHealth, startLiveScheduler, utcSchedulerSlot } from './scheduler.mjs'
+import { createIngestionRunSlotGuard, createLiveSchedulerController, dueHorizonJobs, FIXED_UTC_SLOT_HOURS, HORIZON_UTC_HOURS, nextUtcSchedulerSlot, runScheduledOnce, schedulePlan, schedulerCycleId, schedulerHealth, startLiveScheduler, utcSchedulerSlot } from './scheduler.mjs'
 import { collectLiveSharedInputs } from './liveIngestionPipeline.mjs'
 import { baselineCacheKey } from './baselineCache.mjs'
 describe('live scheduler core', () => {
-  it('is disabled by default and plans without provider or database I/O', () => { const plan = schedulePlan({ env: {}, now: new Date('2026-09-04T10:12:00Z') }); expect(plan.config.enabled).toBe(false); expect(plan.windows.map((x) => x.providerRange)).toEqual(['past_day', 'past_7_days', 'past_30_days', 'past_12_months']); expect(plan.windows[0].cycleId).toContain('scheduled:2026-09-04T08:00:00Z:24H') })
-  it('accounts for all four window ingestions and one shared cold baseline refresh', () => {
-    const plan = schedulePlan({ env: { LIVE_INGEST_CANDIDATE_LIMIT: '10' }, now: new Date('2026-09-04T10:12:00Z') })
-    expect(plan.estimates).toMatchObject({ windowCount: 4, serpApiRequests: 1, trendsRequests: 40, trendsCostUsd: 0.048, warmInvocationCostUsd: 0.048 })
-    expect(plan.estimates.baseline).toMatchObject({ coldRequests: 1, warmRequests: 0, coldCostUsd: 0.09, warmCostUsd: 0, steadyCostUsd: 0.015 })
-    expect(plan.estimates.coldCycleCostUsd).toBeCloseTo(0.138)
-    expect(plan.estimates.steadyCycleCostUsd).toBeCloseTo(0.063)
-    expect(plan.estimates.estimatedMonthlyCostUsd.candidates10).toBeCloseTo(11.34)
-    expect(plan.estimates.estimatedMonthlyCostUsd.candidates50).toBeCloseTo(45.9)
-    expect(plan.estimates.estimatedMonthlyCostUsd.candidates100).toBeCloseTo(89.1)
+  it('uses the exact UTC production cadence without provider or database I/O', () => {
+    expect(HORIZON_UTC_HOURS).toEqual({ '24H': [0, 4, 8, 12, 16, 20], '7D': [0, 8, 16], '30D': [0], '1Y': [0] })
+    expect(dueHorizonJobs({ slot: new Date('2026-09-04T04:00:00Z') }).map((x) => x.window)).toEqual(['24H'])
+    expect(dueHorizonJobs({ slot: new Date('2026-09-04T08:00:00Z') }).map((x) => x.window)).toEqual(['24H', '7D'])
+    expect(dueHorizonJobs({ slot: new Date('2026-09-05T00:00:00Z') }).map((x) => x.window)).toEqual(['24H', '7D', '30D', '1Y'])
   })
-  it('uses the corrected cold-cycle estimate for cost-cap preflight', () => {
-    expect(schedulePlan({ env: { LIVE_INGEST_CANDIDATE_LIMIT: '10', LIVE_MAX_PROVIDER_COST_USD: '0.12' } }).withinCostCap).toBe(false)
-    expect(schedulePlan({ env: { LIVE_INGEST_CANDIDATE_LIMIT: '10', LIVE_MAX_PROVIDER_COST_USD: '0.138' } }).withinCostCap).toBe(true)
+  it('reports the daily shared dependency and quota envelope', () => {
+    const plan = schedulePlan({ env: { LIVE_INGEST_CANDIDATE_LIMIT: '10' }, now: new Date('2026-09-05T00:00:00Z') })
+    expect(plan.windows.map((x) => x.window)).toEqual(['24H', '7D', '30D', '1Y'])
+    expect(plan.estimates.daily).toEqual(expect.objectContaining({ discoveryCycles: 1, serpApiRequests: 5, estimatedMonthlySerpApiRequests: 150, baselineRefreshes: 1, horizonRefreshes: { '24H': 6, '7D': 3, '30D': 1, '1Y': 1 } }))
+    expect(plan.estimates).toMatchObject({ serpApiRequests: 5, adaptive7dOverflow: { maximumAdditionalCandidates: 0, triggeredOnly: true } })
+    expect(schedulePlan({ now: new Date('2026-09-05T04:00:00Z') })).toMatchObject({ discoveryDue: false, estimates: { serpApiRequests: 0, baseline: { coldRequests: 0 } } })
   })
-  it('prices the configured maximum paid exposure rather than the initial adaptive batch', () => {
-    const plan = schedulePlan({ env: { LIVE_DISCOVERY_LIMIT: '50', LIVE_INITIAL_PAID_CANDIDATES: '15', LIVE_MAX_PAID_CANDIDATES: '50', LIVE_MAX_PROVIDER_COST_USD: '0.33' } })
-    expect(plan.config).toMatchObject({ displayLimit: 20, discoveryLimit: 50, initialPaidCandidates: 15, maxPaidCandidates: 50 })
-    expect(plan.estimates).toMatchObject({ trendsRequests: 200, coldCycleCostUsd: 0.33 })
-    expect(plan.withinCostCap).toBe(true)
-  })
-  it('cannot bypass the existing live write gate or cost cap', async () => { const prepare = vi.fn(); const run = vi.fn(); await expect(runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true' }, prepareShared: prepare, runIngestion: run })).rejects.toThrow('ALLOW_LIVE_DATABASE_WRITE'); await expect(runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true', LIVE_MAX_PROVIDER_COST_USD: '0.001' }, prepareShared: prepare, runIngestion: run })).rejects.toThrow('exceeds'); expect(prepare).not.toHaveBeenCalled(); expect(run).not.toHaveBeenCalled() })
-  it('prepares one shared cohort and reuses it across four distinct window cycles', async () => { const shared = { sharedInputs: { candidates: [{ normalizedQuery: 'same-topic' }] }, repository: {} }; const prepare = vi.fn(async () => shared); const run = vi.fn(async (env, received) => ({ cycle: env.LIVE_INGEST_CYCLE_ID, window: env.LIVE_INGEST_HISTORY_WINDOW, received })); const result = await runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true' }, now: new Date('2026-09-04T10:00:00Z'), prepareShared: prepare, runIngestion: run }); expect(prepare).toHaveBeenCalledTimes(1); expect(result.results).toHaveLength(4); expect(new Set(result.results.map((x) => x.cycle)).size).toBe(4); expect(result.results.map((x) => x.window)).toEqual(['24H', '7D', '30D', '1Y']); expect(result.results.every((x) => x.received === shared)).toBe(true); expect(run.mock.calls.every(([env]) => env.LIVE_INGEST_DRY_RUN === 'false')).toBe(true) })
+  it('cannot bypass the live write gate or cost cap', async () => { const prepare = vi.fn(); const run = vi.fn(); await expect(runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true' }, now: new Date('2026-09-05T00:00:00Z'), prepareShared: prepare, runIngestion: run })).rejects.toThrow('ALLOW_LIVE_DATABASE_WRITE'); await expect(runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true', LIVE_MAX_PROVIDER_COST_USD: '0.001' }, now: new Date('2026-09-05T00:00:00Z'), prepareShared: prepare, runIngestion: run })).rejects.toThrow('exceeds'); expect(prepare).not.toHaveBeenCalled(); expect(run).not.toHaveBeenCalled() })
+  it('prepares one shared dependency and invokes only due horizons', async () => { const shared = { sharedInputs: { sharedMetrics: { providerRequests: {}, providerCosts: {} } }, repository: {} }; const prepare = vi.fn(async () => shared); const run = vi.fn(async (env, received) => ({ cycle: env.LIVE_INGEST_CYCLE_ID, window: env.LIVE_INGEST_HISTORY_WINDOW, received, requestMetrics: { providerRequests: {}, providerCosts: {} } })); const result = await runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true' }, now: new Date('2026-09-05T08:00:00Z'), prepareShared: prepare, runIngestion: run }); expect(prepare).toHaveBeenCalledTimes(1); expect(result.results.map((x) => x.window)).toEqual(['24H', '7D']); expect(result.results.every((x) => x.received === shared)).toBe(true); expect(run.mock.calls.every(([env]) => env.LIVE_INGEST_DRY_RUN === 'false')).toBe(true) })
   it('resolves discovery and fresh baseline cache exactly once for the shared slot cohort', async () => {
     const candidates = [{ query: 'One', normalizedQuery: 'one', category: 'Technology', searchVolume: 1 }, { query: 'Two', normalizedQuery: 'two', category: 'Technology', searchVolume: 1 }]
     const request = { locationCode: 2840 }
@@ -33,17 +25,17 @@ describe('live scheduler core', () => {
     const list = vi.fn(async ({ cacheKeys }) => cacheKeys.map((cache_key, index) => ({ cache_key, availability: 'available', search_volume: index, monthly_history: [], retrieved_at: '2099-01-01T00:00:00Z' })))
     const lookup = vi.fn()
     const shared = await collectLiveSharedInputs({ candidateLimit: 10, discoveryRequest: { geographicScope: { kind: 'country', countryCode: 'US' } }, volumeRequest: request, discoveryClient: { discover }, volumeClient: { lookup }, baselineCacheRepository: { listLiveBaselineDemandCache: list } })
-    expect(discover).toHaveBeenCalledTimes(1); expect(list).toHaveBeenCalledTimes(1); expect(lookup).not.toHaveBeenCalled(); expect(shared.candidates).toEqual(candidates); expect(list).toHaveBeenCalledWith({ cacheKeys: candidates.map((candidate) => baselineCacheKey(candidate.normalizedQuery, request)) })
+    expect(discover).toHaveBeenCalledTimes(1); expect(list).toHaveBeenCalledTimes(1); expect(lookup).not.toHaveBeenCalled(); expect(shared.candidates).toEqual(expect.arrayContaining(candidates.map((candidate) => expect.objectContaining(candidate)))); expect(list).toHaveBeenCalledWith({ cacheKeys: candidates.map((candidate) => baselineCacheKey(candidate.normalizedQuery, request)) })
   })
-  it('skips an all-completed slot before shared inputs or external work', async () => {
+  it('skips all completed due jobs before shared inputs or external work', async () => {
     const prepare = vi.fn(); const run = vi.fn()
-    const result = await runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true' }, isWindowComplete: vi.fn(async () => true), prepareShared: prepare, runIngestion: run })
+    const result = await runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true' }, now: new Date('2026-09-05T00:00:00Z'), isWindowComplete: vi.fn(async () => true), prepareShared: prepare, runIngestion: run })
     expect(result.skipped).toHaveLength(4); expect(prepare).not.toHaveBeenCalled(); expect(run).not.toHaveBeenCalled(); expect(result.providerSummary.aggregate).toEqual({ serpApi: 0, dataForSeoSearchVolume: 0, dataForSeoTrends: 0, dataForSeoCost: 0 })
   })
-  it.each([1, 2])('runs shared preparation once and Trends only for %s pending window(s)', async (pendingCount) => {
-    let checks = 0; const prepare = vi.fn(async () => ({ sharedInputs: { sharedMetrics: { providerRequests: { serpApi: 1, dataForSeoSearchVolume: 0 }, providerCosts: { searchVolume: 0 } } } })); const run = vi.fn(async () => ({ requestMetrics: { providerRequests: { dataForSeoTrends: 10 }, providerCosts: { trends: 0.012 } } }))
-    const result = await runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true' }, isWindowComplete: vi.fn(async () => checks++ < 4 - pendingCount), prepareShared: prepare, runIngestion: run })
-    expect(prepare).toHaveBeenCalledTimes(1); expect(run).toHaveBeenCalledTimes(pendingCount); expect(result.providerSummary.aggregate).toMatchObject({ serpApi: 1, dataForSeoSearchVolume: 0, dataForSeoTrends: pendingCount * 10, dataForSeoCost: pendingCount * 0.012 })
+  it('runs unrelated due horizons even when one fails', async () => {
+    const run = vi.fn(async (env) => { if (env.LIVE_INGEST_HISTORY_WINDOW === '7D') throw new Error('7D failed'); return { requestMetrics: { providerRequests: {}, providerCosts: {} } } })
+    await expect(runScheduledOnce({ env: { LIVE_SCHEDULER_ENABLED: 'true', ALLOW_LIVE_DATABASE_WRITE: 'true' }, now: new Date('2026-09-05T08:00:00Z'), prepareShared: async () => ({ sharedInputs: { sharedMetrics: { providerRequests: {}, providerCosts: {} } } }), runIngestion: run })).rejects.toThrow(/7D failed/)
+    expect(run).toHaveBeenCalledTimes(2)
   })
   it('uses only the exact fixed UTC 00/04/08/12/16/20 cadence and exposes the next slot', () => {
     expect(FIXED_UTC_SLOT_HOURS).toEqual([0, 4, 8, 12, 16, 20])
@@ -51,6 +43,10 @@ describe('live scheduler core', () => {
     expect(nextUtcSchedulerSlot(new Date('2026-09-04T08:00:00Z')).toISOString()).toBe('2026-09-04T12:00:00.000Z')
     expect(schedulePlan({ now: new Date('2026-09-04T23:59:59Z') }).nextScheduledUtcRun).toBe('2026-09-05T00:00:00Z')
     expect(() => schedulePlan({ env: { LIVE_REFRESH_INTERVAL_MINUTES: '60' } })).toThrow(/exactly 240/)
+  })
+  it('keeps Google Trends on an independently configurable eight-hour cadence', () => {
+    expect(schedulePlan({ env: {} }).config.googleTrendsRefreshMinutes).toBe(480)
+    expect(schedulePlan({ env: { LIVE_GOOGLE_TRENDS_REFRESH_MINUTES: '240' } }).config.googleTrendsRefreshMinutes).toBe(240)
   })
   it('keeps the long-running scheduler inert by default while reporting clean startup diagnostics', () => {
     const executeOnce = vi.fn()
@@ -68,7 +64,7 @@ describe('live scheduler core', () => {
     expect(first).toMatchObject({ status: 'succeeded', schedulerSlot: '2026-09-04T12:00:00Z', retryCount: 0 })
     expect(second).toMatchObject({ status: 'skipped', reason: 'duplicate-slot-in-process' })
     expect(executeOnce).toHaveBeenCalledTimes(1)
-    expect(first.cycleIds).toEqual(['24H', '7D', '30D', '1Y'].map((window) => schedulerCycleId({ slot, window })))
+    expect(first.cycleIds).toEqual([schedulerCycleId({ slot, window: '24H' })])
   })
   it('does not overlap a running slot and emits an explicit skip reason', async () => {
     let release

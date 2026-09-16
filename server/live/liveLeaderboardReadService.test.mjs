@@ -15,7 +15,14 @@ function unifiedRow({ rank = 1, id = `unified-${rank}`, snapshotId = header.snap
   }
 }
 
-function repository({ latestUnified = header, exact = header, previousUnified = null, entries = [unifiedRow()], previousEntries = [], latestLegacy = null } = {}) {
+function unifiedRows({ snapshotId = header.snapshot_id, startRank = 1, count = 20 } = {}) {
+  return Array.from({ length: count }, (_, index) => {
+    const rank = startRank + index
+    return unifiedRow({ rank, id: `unified-${rank}`, snapshotId })
+  })
+}
+
+function repository({ latestUnified = header, exact = header, previousUnified = null, entries = unifiedRows(), previousEntries = [], latestLegacy = null } = {}) {
   return {
     getLatestUnifiedLiveSnapshot: vi.fn(async () => latestUnified), getUnifiedLiveSnapshot: vi.fn(async () => exact),
     getLatestLiveSnapshot: vi.fn(async () => latestLegacy), getPreviousUnifiedLiveSnapshot: vi.fn(async () => previousUnified),
@@ -38,7 +45,7 @@ describe('live movement helpers', () => {
 describe('public persisted live leaderboard read service', () => {
   it('defaults to the latest successful 24H v2 snapshot', async () => {
     const latest24H = { ...header, snapshot_id: 'snapshot-24h', cycle_id: 'cycle-24h', selected_window: '24H' }
-    const repo = repository({ latestUnified: latest24H, entries: [unifiedRow({ snapshotId: latest24H.snapshot_id })] })
+    const repo = repository({ latestUnified: latest24H, entries: unifiedRows({ snapshotId: latest24H.snapshot_id }) })
     const result = await readLiveLeaderboard({ repository: repo })
     expect(repo.getLatestUnifiedLiveSnapshot).toHaveBeenCalledWith({ selectedWindow: '24H' })
     expect(result.snapshot).toMatchObject({ snapshotId: 'snapshot-24h', selectedWindow: '24H', snapshotFormatVersion: 2 })
@@ -46,7 +53,7 @@ describe('public persisted live leaderboard read service', () => {
 
   it.each(['24H', '7D', '30D', '1Y'])('returns the latest successful v2 %s snapshot only', async (selectedWindow) => {
     const selected = { ...header, snapshot_id: `snapshot-${selectedWindow}`, selected_window: selectedWindow }
-    const repo = repository({ latestUnified: selected, entries: [unifiedRow({ snapshotId: selected.snapshot_id })] })
+    const repo = repository({ latestUnified: selected, entries: unifiedRows({ snapshotId: selected.snapshot_id }) })
     const result = await readLiveLeaderboard({ repository: repo, selectedWindow })
     expect(repo.getLatestUnifiedLiveSnapshot).toHaveBeenCalledWith({ selectedWindow })
     expect(result.snapshot.selectedWindow).toBe(selectedWindow)
@@ -57,11 +64,40 @@ describe('public persisted live leaderboard read service', () => {
       '24H': { ...header, snapshot_id: 'snapshot-24h', cycle_id: 'cycle-24h', selected_window: '24H', scored_at: '2026-09-11T12:00:00.000Z' },
       '1Y': { ...header, snapshot_id: 'snapshot-1y', cycle_id: 'cycle-1y', selected_window: '1Y', scored_at: '2026-09-11T12:03:00.000Z' },
     }
-    const repo = repository({ latestUnified: null, entries: [unifiedRow({ snapshotId: latestByWindow['24H'].snapshot_id })] })
+    const repo = repository({ latestUnified: null, entries: unifiedRows({ snapshotId: latestByWindow['24H'].snapshot_id }) })
     repo.getLatestUnifiedLiveSnapshot.mockImplementation(async ({ selectedWindow }) => latestByWindow[selectedWindow] ?? null)
     const result = await readLiveLeaderboard({ repository: repo, selectedWindow: '24H' })
     expect(result.snapshot).toMatchObject({ snapshotId: 'snapshot-24h', selectedWindow: '24H' })
     expect(repo.getLatestUnifiedLiveSnapshot).toHaveBeenCalledOnce()
+  })
+
+  it('skips an accidentally persisted partial 7D snapshot and continues serving the earlier full 7D board', async () => {
+    const partial = { ...header, snapshot_id: 'snapshot-7d-partial', cycle_id: 'partial-7d', selected_window: '7D', scored_at: '2026-09-14T16:00:00.000Z' }
+    const prior = { ...header, snapshot_id: 'snapshot-7d-full', cycle_id: 'full-7d', selected_window: '7D', scored_at: '2026-09-14T12:00:00.000Z' }
+    const rows = new Map([[partial.snapshot_id, unifiedRows({ snapshotId: partial.snapshot_id, count: 14 })], [prior.snapshot_id, unifiedRows({ snapshotId: prior.snapshot_id })]])
+    const repo = {
+      getLatestUnifiedLiveSnapshot: vi.fn(async () => partial),
+      getUnifiedLiveSnapshot: vi.fn(async () => null),
+      getPreviousUnifiedLiveSnapshot: vi.fn(async ({ selectedWindow, beforeScoredAt }) => selectedWindow === '7D' && beforeScoredAt === partial.scored_at ? prior : null),
+      listLiveSnapshotEntries: vi.fn(async ({ snapshotId }) => rows.get(snapshotId) ?? []),
+    }
+    const result = await readLiveLeaderboard({ repository: repo, selectedWindow: '7D' })
+    expect(result.snapshot).toMatchObject({ snapshotId: prior.snapshot_id, cycleId: 'full-7d', selectedWindow: '7D' })
+    expect(result.entries).toHaveLength(20)
+    expect(repo.getPreviousUnifiedLiveSnapshot).toHaveBeenCalledWith({ selectedWindow: '7D', beforeScoredAt: partial.scored_at })
+  })
+
+  it.each(['7D', '30D', '1Y'])('fails closed for a partial %s board when no earlier complete exact-horizon snapshot exists', async (selectedWindow) => {
+    const partial = { ...header, snapshot_id: `snapshot-${selectedWindow}-partial`, cycle_id: `partial-${selectedWindow}`, selected_window: selectedWindow }
+    const repo = {
+      getLatestUnifiedLiveSnapshot: vi.fn(async () => partial),
+      getUnifiedLiveSnapshot: vi.fn(async () => partial),
+      getPreviousUnifiedLiveSnapshot: vi.fn(async () => null),
+      listLiveSnapshotEntries: vi.fn(async () => unifiedRows({ snapshotId: partial.snapshot_id, count: 14 })),
+    }
+    await expect(readLiveLeaderboard({ repository: repo, selectedWindow })).rejects.toThrow(`No live snapshot exists for window ${selectedWindow}`)
+    await expect(readLiveLeaderboard({ repository: repo, selectedWindow, cycleId: partial.cycle_id })).rejects.toThrow(`No live snapshot exists for window ${selectedWindow} and cycle ${partial.cycle_id}`)
+    expect(repo.getLatestUnifiedLiveSnapshot).toHaveBeenCalledWith({ selectedWindow })
   })
 
   it('uses the same successful v2 window contract for exact-cycle reads', async () => {
@@ -72,12 +108,21 @@ describe('public persisted live leaderboard read service', () => {
   })
 
   it('uses only a prior v2 snapshot from the same window for movement', async () => {
-    const repo = repository({ entries: [unifiedRow({ rank: 2, id: 'same' }), unifiedRow({ rank: 1, id: 'new' })], previousUnified: previousHeader, previousEntries: [unifiedRow({ snapshotId: previousHeader.snapshot_id, rank: 4, id: 'same' })] })
+    const repo = repository({ entries: [unifiedRow({ rank: 2, id: 'same' }), unifiedRow({ rank: 1, id: 'new' }), ...unifiedRows({ startRank: 3, count: 18 })], previousUnified: previousHeader, previousEntries: [unifiedRow({ snapshotId: previousHeader.snapshot_id, rank: 4, id: 'same' })] })
     const result = await readLiveLeaderboard({ repository: repo, selectedWindow: '1Y' })
     expect(repo.getPreviousUnifiedLiveSnapshot).toHaveBeenCalledWith({ selectedWindow: '1Y', beforeScoredAt: header.scored_at })
     expect(result.entries.find((entry) => entry.candidateId === 'candidate-same')).toMatchObject({ publicRank: 2, publicScore: 82, growthPercent: 184, growthSource: 'provider-history' })
     expect(result.entries.find((entry) => entry.candidateId === 'candidate-same').movement).toEqual({ state: 'up', delta: 2, previousRank: 4 })
     expect(result.entries.find((entry) => entry.candidateId === 'candidate-new').movement).toEqual({ state: 'new', delta: null, previousRank: null })
+  })
+
+  it('returns the persisted Heat decision and labels old snapshots with explicit diagnostic provenance', async () => {
+    const diagnostics = { heatStatus: 'available', heatLevel: 'stable', heatEvidenceAvailable: true, heatEvidenceSource: 'current-intensity', heatFallbackUsed: true, heatPendingReason: null }
+    const persisted = unifiedRow({ component_availability: { presentation: { growthPercent: 184, growthSource: 'provider-history', growthSaturated: false, trendHeat: 'stable', heatDiagnostics: diagnostics } } })
+    const result = await readLiveLeaderboard({ repository: repository({ entries: [persisted, ...unifiedRows({ startRank: 2, count: 19 })] }), selectedWindow: '1Y' })
+    expect(result.entries[0]).toMatchObject({ trendHeat: 'stable', ...diagnostics })
+    const legacy = await readLiveLeaderboard({ repository: repository({ entries: [unifiedRow({ component_availability: { presentation: { trendHeat: null } } }), ...unifiedRows({ startRank: 2, count: 19 })] }), selectedWindow: '1Y' })
+    expect(legacy.entries[0]).toMatchObject({ heatStatus: 'pending', heatPendingReason: 'legacy-heat-diagnostics-unavailable' })
   })
 
   it('returns an explicit unavailable error when the requested v2 window is absent, without a legacy fallback', async () => {

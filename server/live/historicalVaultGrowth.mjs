@@ -15,9 +15,13 @@ export const VAULT_GROWTH_DEFINITIONS = DEFINITIONS
 function definitionFor(window, slotMinutes) {
   const definition = DEFINITIONS[window]
   if (!definition) throw new Error(`Unsupported vault window: ${window}`)
-  return window === '24H' && slotMinutes === 60
-    ? { ...definition, recentSlots: 12, previousSlots: 12, minimumSlots: 9, segmentMs: 12 * HOUR }
-    : definition
+  // Canonical attention is the only hourly, cross-run comparable source. Keep
+  // the legacy generic-vault definitions unchanged; specialize only canonical
+  // reads, which explicitly pass a 60-minute slot cadence.
+  if (slotMinutes !== 60) return definition
+  if (window === '24H') return { ...definition, kind: 'slots', recentSlots: 12, previousSlots: 12, minimumSlots: 9, segmentMs: 12 * HOUR }
+  if (window === '7D') return { ...definition, kind: 'slots', recentSlots: 168, previousSlots: 168, minimumSlots: 126, segmentMs: 7 * DAY }
+  return definition
 }
 
 function mean(values) { return values.reduce((total, value) => total + value, 0) / values.length }

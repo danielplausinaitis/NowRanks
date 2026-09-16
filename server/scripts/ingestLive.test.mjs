@@ -63,4 +63,36 @@ describe('live canonical history loading regression', () => {
     expect(preferred.scores[0].presentation).toMatchObject({ growthPercent: 100, growthSource: 'nowranks-history', vaultGrowth: { promotion: { eligible: true, promotedInPreferred: true } } })
     expect(preferred.requestMetrics.vault).toMatchObject({ preferredPromoted: 1, publicChangedByVault: 1 })
   })
+
+  it('promotes mature canonical 7D Growth only in preferred mode and preserves the fallback in shadow mode', async () => {
+    const latest = Date.parse('2026-01-14T23:00:00.000Z')
+    const canonical = Array.from({ length: 336 }, (_, index) => ({ candidate_id: candidateId, series_key: 'series', segment_id: 'segment', observed_at: new Date(latest - (335 - index) * 3_600_000).toISOString(), canonical_attention: index < 168 ? 10 : 20, alignment_confidence: 'high' }))
+    const repository = { listCandidatesByNormalizedQueries: vi.fn(async () => [{ candidate_id: candidateId, normalized_query: query }]), listLiveCanonicalAttentionPoints: vi.fn(async () => canonical) }
+    const cycle = { candidates: [{ normalizedQuery: query }], scoredAt: '2026-01-14T23:00:00.000Z', requestMetrics: {}, scores: [{ normalizedQuery: query, presentation: { growthPercent: 1_000, growthSource: 'discovery-increase', growthSaturated: true }, raw: { currentTrendIntensity: { increasePercentage: 1_000 } } }] }
+    const shadow = await attachVaultGrowth({ cycle, repository, historyWindow: '7D', vaultConfig: { enabled: true, growthMode: 'shadow', slotMinutes: 240 } })
+    expect(shadow.scores[0].presentation).toMatchObject({ growthPercent: 1_000, growthSource: 'discovery-increase', growthSaturated: true, vaultGrowth: { promotion: { eligible: true, wouldPromoteInShadow: true, promotedInPreferred: false } } })
+    const preferred = await attachVaultGrowth({ cycle, repository, historyWindow: '7D', vaultConfig: { enabled: true, growthMode: 'preferred', slotMinutes: 240 } })
+    expect(preferred.scores[0].presentation).toMatchObject({ growthPercent: 100, growthSource: 'nowranks-history', growthSaturated: false, vaultGrowth: { promotion: { eligible: true, promotedInPreferred: true } } })
+  })
+
+  it.each(['7D', '30D', '1Y'])('never reintroduces country discovery Growth for global %s output when global history is unavailable', async (historyWindow) => {
+    const repository = {
+      listCandidatesByNormalizedQueries: vi.fn(async () => [{ candidate_id: candidateId, normalized_query: query }]),
+      ...(historyWindow === '7D'
+        ? { listLiveCanonicalAttentionPoints: vi.fn(async () => []) }
+        : { listLiveHistoricalVaultMeasurements: vi.fn(async () => []) }),
+    }
+    const cycle = {
+      candidates: [{ normalizedQuery: query }], scoredAt: '2026-01-14T23:00:00.000Z', requestMetrics: {},
+      scores: [{
+        normalizedQuery: query,
+        publicScoringDiagnostics: { discoveryMagnitudeUsedInPublicScore: false },
+        presentation: { growthPercent: null, growthSource: 'unavailable', growthSaturated: false },
+        raw: { currentTrendIntensity: { increasePercentage: 1_000 } },
+      }],
+    }
+    const result = await attachVaultGrowth({ cycle, repository, historyWindow, vaultConfig: { enabled: true, growthMode: 'preferred', slotMinutes: 240 } })
+    expect(result.scores[0].presentation).toMatchObject({ growthPercent: null, growthSource: 'unavailable', growthSaturated: false })
+    expect(result.scores[0].presentation.vaultGrowth).toMatchObject({ discoveryIncreasePercentage: null, promotion: { eligible: false } })
+  })
 })

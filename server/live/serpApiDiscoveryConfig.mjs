@@ -26,3 +26,10 @@ export function buildSerpApiDiscoveryRequestFromEnv(env = process.env) {
     geographicScope: { kind: 'country', countryCode: geo },
   }
 }
+
+/** Opt-in multi-country requests; callers merge them before paid selection. */
+export function buildSerpApiDiscoveryRequestsFromEnv(env = process.env) {
+  const legacy = buildSerpApiDiscoveryRequestFromEnv(env)
+  return resolveDiscoveryGeos(env).map((geo) => ({ ...legacy, geo, geographicScope: { kind: 'country', countryCode: geo } }))
+}
+import { resolveDiscoveryGeos } from './globalDiscovery.mjs'

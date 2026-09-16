@@ -24,7 +24,33 @@ function score(value) {
   return typeof value === 'number' ? value.toFixed(2) : 'N/A'
 }
 function growth(entry) {
-  return Number.isFinite(entry.growthPercent) ? `${entry.growthPercent > 0 ? '+' : ''}${entry.growthPercent}% (${entry.growthSource ?? 'unavailable'})` : 'unavailable'
+  const diagnostics = entry.componentAvailability?.presentation?.growthDiagnostics ?? {
+    availability: Number.isFinite(entry.growthPercent),
+    source: entry.growthSource ?? 'unavailable',
+    saturation: entry.growthSaturated === true,
+    promotion: null,
+    fallbackReason: 'not-recorded-in-snapshot',
+  }
+  const value = Number.isFinite(entry.growthPercent)
+    ? `${entry.growthPercent > 0 ? '+' : ''}${entry.growthPercent}% (${entry.growthSource ?? 'unavailable'}${entry.growthSaturated ? '; saturated' : ''})`
+    : 'unavailable'
+  const promotion = diagnostics.promotion
+  const decision = promotion?.promotionOutcome ?? (promotion?.reason ? 'fallback' : 'not-recorded')
+  const fallback = diagnostics.fallbackReason ?? promotion?.reason ?? 'not-recorded-in-snapshot'
+  return `${value}; availability=${diagnostics.availability === true ? 'available' : 'unavailable'}; promotion=${decision}; fallback=${fallback}`
+}
+function heat(entry) {
+  const diagnostics = entry.heatStatus
+    ? entry
+    : entry.componentAvailability?.presentation?.heatDiagnostics ?? {
+      heatStatus: entry.trendHeat === null ? 'pending' : 'available',
+      heatLevel: entry.trendHeat ?? null,
+      heatEvidenceAvailable: entry.trendHeat !== null,
+      heatEvidenceSource: entry.trendHeat === null ? null : 'legacy-heat-source-not-recorded',
+      heatFallbackUsed: false,
+      heatPendingReason: entry.trendHeat === null ? 'legacy-heat-diagnostics-unavailable' : null,
+    }
+  return `${diagnostics.heatLevel ?? 'Evidence pending'}; status=${diagnostics.heatStatus}; evidence=${diagnostics.heatEvidenceAvailable ? 'available' : 'unavailable'}; source=${diagnostics.heatEvidenceSource ?? 'none'}; fallback=${diagnostics.heatFallbackUsed ? 'yes' : 'no'}; pending=${diagnostics.heatPendingReason ?? 'none'}`
 }
 function movement(entry) {
   const value = entry.movement
@@ -50,7 +76,7 @@ export async function runLiveReadCheck({ env = process.env, args, write = consol
   write('')
   if (result.rankingMode === 'unified') {
     write('Unified public leaderboard:')
-    result.entries.forEach((entry) => write(`#${entry.publicRank} ${entry.title} | now score ${score(entry.publicScore)} | growth ${growth(entry)} | status ${entry.evidenceStatus} | movement ${movement(entry)}`))
+    result.entries.forEach((entry) => write(`#${entry.publicRank} ${entry.title} | now score ${score(entry.publicScore)} | heat ${heat(entry)} | growth ${growth(entry)} | status ${entry.evidenceStatus} | movement ${movement(entry)}`))
     write('')
     write(`total: ${result.entries.length}`)
     write('No writes performed.')

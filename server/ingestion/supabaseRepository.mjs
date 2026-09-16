@@ -91,11 +91,19 @@ export function createSupabaseIngestionRepository(supabase) {
     /** One cohort query; callers group rows and never issue a per-topic history lookup. */
     async listLiveCanonicalAttentionPoints({ candidateIds, seriesKey, startAt, endAt }) {
       if (!candidateIds?.length) return []
-      let query = supabase.from('live_canonical_attention_points').select('*').in('candidate_id', candidateIds)
-      if (seriesKey) query = query.eq('series_key', seriesKey)
-      if (startAt) query = query.gte('observed_at', startAt)
-      if (endAt) query = query.lte('observed_at', endAt)
-      return requireSuccess(await query.order('observed_at', { ascending: true }), 'select range', 'live_canonical_attention_points') ?? []
+      // A 7D canonical cohort can contain 20 * 336 hourly rows. Page through
+      // the Data API limit rather than silently losing later candidates.
+      const pageSize = 1_000
+      const all = []
+      for (let from = 0; ; from += pageSize) {
+        let query = supabase.from('live_canonical_attention_points').select('*').in('candidate_id', candidateIds)
+        if (seriesKey) query = query.eq('series_key', seriesKey)
+        if (startAt) query = query.gte('observed_at', startAt)
+        if (endAt) query = query.lte('observed_at', endAt)
+        const page = requireSuccess(await query.order('observed_at', { ascending: true }).order('candidate_id', { ascending: true }).order('series_key', { ascending: true }).order('segment_id', { ascending: true }).range(from, from + pageSize - 1), 'select range', 'live_canonical_attention_points') ?? []
+        all.push(...page)
+        if (page.length < pageSize) return all
+      }
     },
     async listLiveCanonicalAttentionAlignments({ candidateId, limit = 25 }) {
       return requireSuccess(await supabase.from('live_canonical_attention_alignments')
@@ -105,7 +113,7 @@ export function createSupabaseIngestionRepository(supabase) {
     /** Read-only input for the bounded active tracking allocator. */
     async listRecentCanonicalTrackingArtifacts({ since }) {
       return requireSuccess(await supabase.from('live_provider_curve_artifacts')
-        .select('candidate_id, slot_at, retrieved_at, raw_curve, candidates!inner(candidate_id, query_text, normalized_query, category), live_canonical_attention_alignments(accepted, reason, segment_id, confidence)')
+        .select('candidate_id, slot_at, retrieved_at, targeting, raw_curve, candidates!inner(candidate_id, query_text, normalized_query, category), live_canonical_attention_alignments(accepted, reason, segment_id, series_key, confidence)')
         .gte('slot_at', since).order('slot_at', { ascending: false }), 'select tracking artifacts', 'live_provider_curve_artifacts') ?? []
     },
     async upsertLiveSnapshot(snapshot) {
@@ -151,5 +159,11 @@ export function createSupabaseIngestionRepository(supabase) {
     },
     async listLiveBaselineDemandCache({ cacheKeys }) { return requireSuccess(await supabase.from('live_baseline_demand_cache').select('*').in('cache_key', cacheKeys), 'select', 'live_baseline_demand_cache') ?? [] },
     async upsertLiveBaselineDemandCache(rows) { requireSuccess(await supabase.from('live_baseline_demand_cache').upsert(rows, { onConflict: 'cache_key' }), 'upsert batch', 'live_baseline_demand_cache') },
+    /** One server-only daily discovery artifact is shared by every due horizon. */
+    async getLiveDailyDiscoveryCache({ cacheKey }) { return requireSuccess(await supabase.from('live_daily_discovery_cache').select('*').eq('cache_key', cacheKey).maybeSingle(), 'select', 'live_daily_discovery_cache') },
+    async upsertLiveDailyDiscoveryCache(row) { requireSuccess(await supabase.from('live_daily_discovery_cache').upsert(row, { onConflict: 'cache_key' }), 'upsert', 'live_daily_discovery_cache') },
+    /** Historical Google Trends cache is keyed by provider, target, range, and resampling identity. */
+    async listLiveGoogleTrendsHistoryCache({ cacheKeys }) { return requireSuccess(await supabase.from('live_google_trends_history_cache').select('*').in('cache_key', cacheKeys), 'select', 'live_google_trends_history_cache') ?? [] },
+    async upsertLiveGoogleTrendsHistoryCache(rows) { requireSuccess(await supabase.from('live_google_trends_history_cache').upsert(rows, { onConflict: 'cache_key' }), 'upsert batch', 'live_google_trends_history_cache') },
   }
 }

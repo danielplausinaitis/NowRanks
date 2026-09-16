@@ -124,7 +124,7 @@ describe('shadow history retrieval strategies', () => {
     })
     expect(result.providerCost).toBeCloseTo(0.05)
     expect(providerReportedCost({ cost: 0.03, tasks: [{ cost: 99 }] })).toBe(0.03)
-    expect(result.graphMeasurements).toEqual({ invalidOrMissingMeasurements: 0, affectedCandidates: 0 })
+    expect(result.graphMeasurements).toMatchObject({ invalidOrMissingMeasurements: 0, affectedCandidates: 0, totalGraphPoints: 28, positiveMeasurements: 28, candidatesWithoutUsablePoints: 0 })
     expect(Object.keys(result).sort()).toEqual(['graphMeasurements', 'histories', 'providerCost', 'requestCount'])
   })
 
@@ -134,7 +134,7 @@ describe('shadow history retrieval strategies', () => {
     expect(result.histories).toHaveLength(2)
     expect(result.histories[0].observations[3]).toMatchObject({ availability: 'missing', interest: null, missingReason: 'invalid-provider-measurement' })
     expect(result.histories[1].observations.filter((point) => point.availability === 'available')).toHaveLength(14)
-    expect(result.graphMeasurements).toEqual({ invalidOrMissingMeasurements: 1, affectedCandidates: 1 })
+    expect(result.graphMeasurements).toMatchObject({ invalidOrMissingMeasurements: 1, affectedCandidates: 1, nullMeasurements: 1, totalGraphPoints: 28, candidateDiagnostics: expect.arrayContaining([expect.objectContaining({ canonicalQuery: 'Topic 1', nullMeasurements: 1 })]) })
   })
 
   it('lets normal elapsed coverage rules make a heavily degraded candidate insufficient', async () => {

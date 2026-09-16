@@ -8,6 +8,10 @@
 
 `migrations/010_canonical_alignment_gap_diagnostics.sql` is an additive diagnostics migration for the canonical-attention writer. It records the prior canonical gap, overlap-based resume decision, reason, and new-regime decision; it creates no points and must be applied manually before the v2 canonical alignment writer is enabled.
 
+`migrations/011_live_google_trends_history_cache.sql` is an additive, server-only cache table for the economical global Google Trends path. It is keyed by a stable hash over candidate, provider, measurement mode/target, time range, and resampling identity; it retains batch metadata for auditability. Apply it manually in the Supabase SQL Editor only before write-enabled ingestion that persists Google Trends cache rows.
+
+`migrations/012_live_daily_discovery_cache.sql` is an additive, server-only daily candidate-universe cache for the production scheduler. Apply it manually before enabling the refactored scheduler; it is required to share one fresh five-country discovery result across the due 24H, 7D, 30D, and 1Y jobs.
+
 ## Canonical mapping
 
 - `candidates` stores the stable `SearchTopic` identity: ID, display query, normalized query, and category.

@@ -53,6 +53,12 @@ export interface LiveLeaderboardApiEntry {
   growthSource?: 'nowranks-history' | 'provider-history' | 'discovery-increase' | 'unavailable'
   growthSaturated?: boolean
   trendHeat?: 'stable' | 'rising' | 'fast' | 'surging' | 'exploding' | null
+  heatStatus?: 'available' | 'pending'
+  heatLevel?: 'stable' | 'rising' | 'fast' | 'surging' | 'exploding' | null
+  heatEvidenceAvailable?: boolean
+  heatEvidenceSource?: 'historical-shape' | 'discovery-acceleration' | 'current-intensity' | 'mixed' | 'legacy-heat-source-not-recorded' | null
+  heatFallbackUsed?: boolean
+  heatPendingReason?: string | null
   scoredAt: string
   cycleId: string
   selectedWindow: TimeWindow

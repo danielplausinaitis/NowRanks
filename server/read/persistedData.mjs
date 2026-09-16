@@ -8,7 +8,7 @@ function mapProvenance(row) {
   assertRow(row?.provenance_id && row.provider_id && row.data_mode, 'source provenance identity is incomplete')
   assertRow(row.geographic_scope && typeof row.geographic_scope === 'object', `provenance ${row.provenance_id} has no geographic scope`)
   assertRow(['live', 'replay', 'test'].includes(row.data_mode), `provenance ${row.provenance_id} has an invalid data mode`)
-  assertRow(['comparable', 'not-comparable', 'unknown'].includes(row.cross_query_comparability_status), `provenance ${row.provenance_id} has an invalid comparability status`)
+  assertRow(isCrossQueryComparabilityStatus(row.cross_query_comparability_status), `provenance ${row.provenance_id} has an invalid comparability status`)
   return {
     providerId: row.provider_id,
     dataMode: row.data_mode,
@@ -108,3 +108,4 @@ export async function readPersistedTopicData({ repository, providerId, dataMode,
     observationCount: observations.length,
   }
 }
+import { isCrossQueryComparabilityStatus } from '../live/provenanceComparability.mjs'

@@ -6,11 +6,11 @@ import type { Category } from '../domain/types'
 
 afterEach(() => { cleanup(); window.location.hash = '' })
 
-function unifiedResult({ window = '24H', count = 20, growthPercent = 184 }: { window?: '24H' | '7D' | '30D' | '1Y', count?: number, growthPercent?: number | null } = {}): UnifiedLiveLeaderboardApiResponse {
+function unifiedResult({ window = '24H', count = 20, growthPercent = 184, heat = 'surging' }: { window?: '24H' | '7D' | '30D' | '1Y', count?: number, growthPercent?: number | null, heat?: 'stable' | 'rising' | 'fast' | 'surging' | 'exploding' | null } = {}): UnifiedLiveLeaderboardApiResponse {
   const entry = (rank: number, category: Category = 'Technology') => ({
     candidateId: `topic-${rank}`, query: `topic ${rank}`, title: `Topic ${rank}`, normalizedQuery: `topic-${rank}`, category,
     classification: rank === 1 ? 'possible-new-trend' as const : 'established' as const, confidence: rank === 1 ? 'emerging' as const : 'full' as const, confidenceReason: 'test evidence',
-    historyObservationCount: 10, historyAvailableCount: 10, historyCoveragePercentage: 100, searchInterest: 75, componentAvailability: {}, growthPercent, growthSource: growthPercent === null ? 'unavailable' as const : 'provider-history' as const, trendHeat: 'surging' as const,
+    historyObservationCount: 10, historyAvailableCount: 10, historyCoveragePercentage: 100, searchInterest: 75, componentAvailability: {}, growthPercent, growthSource: growthPercent === null ? 'unavailable' as const : 'provider-history' as const, trendHeat: heat,
     scoredAt: '2026-09-08T00:00:00.000Z', cycleId: `cycle-${window}`, selectedWindow: window, movement: rank === 1 ? { state: 'new' as const, delta: null, previousRank: null } : { state: 'unchanged' as const, delta: 0 as const, previousRank: rank },
     publicRank: rank, publicScore: 95 - rank, evidenceStatus: rank === 1 ? 'emerging' as const : 'established' as const,
   })
@@ -41,6 +41,20 @@ describe('App persisted public leaderboard', () => {
     render(<App apiClient={async () => unifiedResult({ count: 1, growthPercent: null })} />)
     expect(await screen.findByText('No comparison')).toBeInTheDocument()
     expect(screen.queryByText('0%')).toBeNull()
+  })
+
+  it('maps persisted Stable Heat to Stable rather than Evidence pending', async () => {
+    render(<App apiClient={async () => unifiedResult({ count: 1, heat: 'stable' })} />)
+    expect(await screen.findByText('stable')).toBeInTheDocument()
+    expect(screen.queryByText('Evidence pending')).toBeNull()
+  })
+
+  it('renders a saturated provider fallback as a lower bound without changing its persisted score or rank', async () => {
+    const apiClient = async () => ({ ...unifiedResult({ count: 1, growthPercent: 1_000 }), entries: unifiedResult({ count: 1, growthPercent: 1_000 }).entries.map((entry) => ({ ...entry, growthSaturated: true, publicRank: 9, publicScore: 73.5 })) })
+    render(<App apiClient={apiClient} />)
+    expect(await screen.findByText('≥1,000%')).toBeInTheDocument()
+    expect(screen.getByText('Topic 1').closest('tr')).toHaveTextContent('#9')
+    expect(screen.getByText('Topic 1').closest('tr')).toHaveTextContent('73.5')
   })
 
   it('requests each selected persisted window and keeps category filtering on returned rows only', async () => {

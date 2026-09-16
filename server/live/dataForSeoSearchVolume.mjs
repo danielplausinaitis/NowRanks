@@ -5,6 +5,8 @@ import { LiveProviderError } from './providerAdapter.mjs'
 export const DATAFORSEO_SEARCH_VOLUME_LIVE_ENDPOINT = 'https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live'
 export const DATAFORSEO_SEARCH_VOLUME_MAX_KEYWORDS = 1000
 export const DATAFORSEO_SEARCH_VOLUME_PROVIDER_ID = 'dataforseo-google-ads-search-volume'
+export const DATAFORSEO_GLOBAL_SEARCH_VOLUME_LIVE_ENDPOINT = 'https://api.dataforseo.com/v3/keywords_data/clickstream_data/global_search_volume/live'
+export const DATAFORSEO_GLOBAL_SEARCH_VOLUME_PROVIDER_ID = 'dataforseo-clickstream-global-search-volume'
 
 function text(value, label) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} is required`)
@@ -141,6 +143,80 @@ export function normalizeDataForSeoSearchVolume({ response, retrievedAt, geograp
   })
 }
 
+function successfulGlobalItems(response) {
+  if (!response || response.status_code !== 20000 || !Array.isArray(response.tasks) || response.tasks.length !== 1) throw new Error('DataForSEO Global Search Volume response must contain one successful task')
+  const task = response.tasks[0]
+  const result = task?.status_code === 20000 && Array.isArray(task.result) && task.result.length === 1 ? task.result[0] : null
+  if (!result || !Array.isArray(result.items)) throw new Error('DataForSEO Global Search Volume task failed or has no items array')
+  return result.items
+}
+
+function globalDistributionDiagnostics(countryDistribution) {
+  if (countryDistribution === null || countryDistribution === undefined) {
+    return { countryDistribution: null, countryDistributionValidCount: 0, countryDistributionSkippedCount: 0, countryDistributionIssues: [] }
+  }
+  if (!Array.isArray(countryDistribution)) {
+    return {
+      countryDistribution: null,
+      countryDistributionValidCount: 0,
+      countryDistributionSkippedCount: 1,
+      countryDistributionIssues: [{ index: null, reason: 'country-distribution-not-array' }],
+    }
+  }
+  const valid = []
+  const issues = []
+  countryDistribution.forEach((row, index) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      issues.push({ index, reason: 'malformed-country-distribution-entry' })
+      return
+    }
+    const countryIsoCode = typeof row.country_iso_code === 'string' ? row.country_iso_code.trim() : ''
+    if (!countryIsoCode) {
+      issues.push({ index, reason: 'missing-country-identifier' })
+      return
+    }
+    try {
+      valid.push({
+        countryIsoCode,
+        searchVolume: nullableNonNegative(row.search_volume, 'DataForSEO global distribution volume'),
+        percentage: nullableNonNegative(row.percentage, 'DataForSEO global distribution percentage'),
+      })
+    } catch {
+      issues.push({ index, reason: 'invalid-country-distribution-values' })
+    }
+  })
+  return {
+    countryDistribution: valid,
+    countryDistributionValidCount: valid.length,
+    countryDistributionSkippedCount: issues.length,
+    countryDistributionIssues: issues,
+  }
+}
+
+/** Normalizes the explicit worldwide Clickstream contract into the existing baseline shape. */
+export function normalizeDataForSeoGlobalSearchVolume({ response, retrievedAt, geographicScope }) {
+  if (typeof retrievedAt !== 'string' || Number.isNaN(Date.parse(retrievedAt))) throw new Error('DataForSEO Global Search Volume retrievedAt must be a valid timestamp')
+  if (geographicScope?.kind !== 'global') throw new Error('DataForSEO Global Search Volume requires global geographicScope')
+  return successfulGlobalItems(response).map((item) => {
+    const query = text(item?.keyword, 'DataForSEO Global Search Volume result keyword')
+    const normalizedQuery = normalizeSearchVolumeQuery(query)
+    const searchVolume = nullableNonNegative(item.search_volume, `DataForSEO global search volume for ${query}`)
+    const distribution = globalDistributionDiagnostics(item.country_distribution)
+    return {
+      providerId: DATAFORSEO_GLOBAL_SEARCH_VOLUME_PROVIDER_ID,
+      sourceId: `${DATAFORSEO_GLOBAL_SEARCH_VOLUME_PROVIDER_ID}:${normalizedQuery}`,
+      query, normalizedQuery, availability: searchVolume === null ? 'missing' : 'available', searchVolume,
+      // The worldwide total is baseline evidence. Country rows are retained as
+      // optional provenance and must never invalidate an otherwise valid total.
+      globalSearchVolume: searchVolume,
+      competition: null, competitionIndex: null, cpc: null, monthlyHistory: null,
+      ...distribution,
+      retrievedAt, geographicScope, providerLocationCode: null, providerLanguageCode: null,
+      provenance: { providerId: DATAFORSEO_GLOBAL_SEARCH_VOLUME_PROVIDER_ID, dataMode: 'live', retrievedAt, geographicScope, collectionMethod: 'clickstream-global-search-volume-live', comparability: { status: 'comparable', basis: 'Provider worldwide clickstream monthly search volume' } },
+    }
+  })
+}
+
 function targetingFingerprint(task) {
   return JSON.stringify({
     location_name: task.location_name ?? null,
@@ -180,6 +256,28 @@ export function createDataForSeoSearchVolumeClient({ env = process.env, fetchImp
         return { response: body, retrievedAt: now(), task }
       } catch (error) {
         throw new LiveProviderError(DATAFORSEO_SEARCH_VOLUME_PROVIDER_ID, { message: formatErrorDiagnostics(error) })
+      }
+    },
+  }
+}
+
+export function createDataForSeoGlobalSearchVolumeClient({ env = process.env, fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
+  return {
+    providerId: DATAFORSEO_GLOBAL_SEARCH_VOLUME_PROVIDER_ID,
+    normalize: normalizeDataForSeoGlobalSearchVolume,
+    async lookup(request) {
+      const credentials = requireDataForSeoCredentials(env)
+      if (request?.measurementMode !== 'global' || request?.geographicScope?.kind !== 'global') throw new Error('Global Search Volume requires explicit global measurement mode')
+      if (!Array.isArray(request.keywords) || request.keywords.length < 1 || request.keywords.length > DATAFORSEO_SEARCH_VOLUME_MAX_KEYWORDS) throw new Error(`DataForSEO Global Search Volume requires one to ${DATAFORSEO_SEARCH_VOLUME_MAX_KEYWORDS} keywords per request`)
+      const task = { keywords: request.keywords.map(validateKeyword) }
+      try {
+        const response = await fetchImpl(DATAFORSEO_GLOBAL_SEARCH_VOLUME_LIVE_ENDPOINT, { method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: buildDataForSeoAuthorization(credentials) }, body: JSON.stringify([task]) })
+        const body = await response.json()
+        if (!response.ok || !isSuccessfulEnvelope(body)) throw responseFailure({ httpStatus: response.status, body })
+        successfulGlobalItems(body)
+        return { response: body, retrievedAt: now(), task }
+      } catch (error) {
+        throw new LiveProviderError(DATAFORSEO_GLOBAL_SEARCH_VOLUME_PROVIDER_ID, { message: formatErrorDiagnostics(error) })
       }
     },
   }

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { assessDataForSeoBatchComparability, assertGlobalDataForSeoComparable } from './comparability.mjs'
 import { buildDataForSeoExploreTask, createDataForSeoTrendsClient, normalizeDataForSeoMeasurement, normalizeDataForSeoMeasurementWithDiagnostics } from './dataForSeoTrends.mjs'
 import { createLiveTrendProviderAdapter, LiveProviderError } from './providerAdapter.mjs'
-import { buildSerpApiTrendingNowUrl, createSerpApiTrendingNowClient, mapSerpApiCategory, normalizeSerpApiTrendingNow, requireSerpApiApiKey } from './serpApiTrendingNow.mjs'
+import { buildSerpApiTrendingNowUrl, classifyPersistedSerpApiDiscoveryCategory, classifySerpApiDiscoveryCategory, createSerpApiTrendingNowClient, mapSerpApiCategory, normalizeSerpApiTrendingNow, requireSerpApiApiKey } from './serpApiTrendingNow.mjs'
 
 const geography = { kind: 'country', countryCode: 'US' }
 const serpResponse = {
@@ -34,13 +34,83 @@ describe('SerpApi Trending Now server transport', () => {
   it('normalizes and deduplicates mocked discovery results with explicit unknown categories', () => {
     const candidates = normalizeSerpApiTrendingNow(serpResponse, { retrievedAt: '2026-08-26T00:00:00.000Z', geographicScope: geography })
     expect(candidates).toHaveLength(1)
-    expect(candidates[0]).toMatchObject({ query: 'Space   Launch', normalizedQuery: 'space launch', category: 'Technology', categories: ['Technology'], searchVolume: 500000, increasePercentage: 900, active: false, startedAt: '2024-08-25T17:46:40.000Z', endedAt: '2024-08-25T18:46:40.000Z', relatedQueries: ['launch time'], retrievedAt: '2026-08-26T00:00:00.000Z', geographicScope: geography })
+    expect(candidates[0]).toMatchObject({ providerId: 'serpapi-google-trends-trending-now', query: 'Space   Launch', normalizedQuery: 'space launch', category: 'Technology', categories: ['Technology'], searchVolume: 500000, increasePercentage: 900, active: false, startedAt: '2024-08-25T17:46:40.000Z', endedAt: '2024-08-25T18:46:40.000Z', relatedQueries: ['launch time'], retrievedAt: '2026-08-26T00:00:00.000Z', geographicScope: geography })
     expect(mapSerpApiCategory('Mystery vertical')).toBeNull()
+  })
+
+  it.each(['US', 'IN'])('accepts a structurally valid %s Trending Now response', async (geo) => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: async () => serpResponse }))
+    const client = createSerpApiTrendingNowClient({ env: { SERPAPI_API_KEY: 'private-key' }, fetchImpl, maxRetries: 0 })
+    const candidates = await client.discover({ geo, geographicScope: { kind: 'country', countryCode: geo } })
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0]).toMatchObject({ providerId: 'serpapi-google-trends-trending-now', geographicScope: { kind: 'country', countryCode: geo } })
+  })
+
+  it('keeps a structurally valid empty response distinct from a failed feed', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ search_metadata: { status: 'Success' }, trending_searches: [] }) }))
+    const client = createSerpApiTrendingNowClient({ env: { SERPAPI_API_KEY: 'private-key' }, fetchImpl })
+    await expect(client.discover({ geo: 'JP', geographicScope: { kind: 'country', countryCode: 'JP' } })).resolves.toEqual([])
+  })
+
+  it('classifies missing expected arrays and provider errors with redacted geo diagnostics', async () => {
+    const malformed = createSerpApiTrendingNowClient({ env: { SERPAPI_API_KEY: 'private-key' }, maxRetries: 0, fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ search_metadata: { status: 'Success' }, api_key: 'must-not-leak' }) }) })
+    await expect(malformed.discover({ geo: 'BR', geographicScope: { kind: 'country', countryCode: 'BR' } })).rejects.toMatchObject({ discoveryDiagnostic: expect.objectContaining({ geo: 'BR', classification: 'missing-trending-searches', requestStatus: 200, topLevelResponseKeys: ['search_metadata'] }) })
+
+    const providerError = createSerpApiTrendingNowClient({ env: { SERPAPI_API_KEY: 'private-key' }, maxRetries: 0, fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({ error: 'rate limit exceeded; api_key=must-not-leak', search_metadata: { status: 'Error' } }) }) })
+    try {
+      await providerError.discover({ geo: 'DE', geographicScope: { kind: 'country', countryCode: 'DE' } })
+    } catch (error) {
+      expect(error).toMatchObject({ discoveryDiagnostic: expect.objectContaining({ geo: 'DE', classification: 'rate-limited-response', requestStatus: 429, rateLimited: true, trendingSearches: { present: false, isArray: false, count: null } }) })
+      expect(error.message).not.toContain('must-not-leak')
+      expect(error.message).not.toContain('private-key')
+    }
+  })
+
+  it('retries only transient SerpApi failures with a bounded provider-local backoff', async () => {
+    const sleep = vi.fn(async () => {})
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ error: 'temporarily unavailable' }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => serpResponse })
+    const client = createSerpApiTrendingNowClient({ env: { SERPAPI_API_KEY: 'private-key' }, fetchImpl, sleep })
+    await expect(client.discover({ geo: 'US', geographicScope: geography })).resolves.toHaveLength(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(sleep).toHaveBeenCalledWith(250)
+  })
+
+  it('preserves specific mapped categories and never defaults an unknown provider category to Entertainment', () => {
+    expect(mapSerpApiCategory('Autos and Vehicles')).toBe('Cars')
+    expect(mapSerpApiCategory('Business and Finance')).toBe('Business')
+    expect(mapSerpApiCategory('Climate')).toBe('Science')
+    expect(mapSerpApiCategory('Food and Drink')).toBe('Lifestyle')
+    expect(mapSerpApiCategory('Jobs and Education')).toBe('Business')
+    expect(mapSerpApiCategory('Law and Government')).toBe('News & Politics')
+    expect(mapSerpApiCategory('Politics')).toBe('News & Politics')
+    expect(mapSerpApiCategory('Science')).toBe('Science')
+    expect(mapSerpApiCategory('Travel and Transportation')).toBe('Travel')
+    expect(classifySerpApiDiscoveryCategory({ query: 'Marvel Rivals', categories: ['Entertainment', 'Gaming'] })).toBe('Gaming')
+    expect(classifySerpApiDiscoveryCategory({ query: 'qcom stock', categories: ['Technology', 'Business'] })).toBe('Finance')
+    expect(classifySerpApiDiscoveryCategory({ query: 'sleep', categories: ['Health', 'Entertainment'] })).toBe('Health')
+    expect(classifySerpApiDiscoveryCategory({ query: 'unknown topic', categories: [] })).toBeNull()
+    expect(classifySerpApiDiscoveryCategory({ query: 'Tesla Roadster', categories: [], rawCategories: ['Other'] })).toBe('Cars')
+    expect(classifySerpApiDiscoveryCategory({ query: 'weather nyc', categories: [], rawCategories: ['Other'] })).toBe('Science')
+    expect(classifySerpApiDiscoveryCategory({ query: 'Dario Amodei', categories: ['Science'] })).toBe('Technology')
+    expect(classifySerpApiDiscoveryCategory({ query: 'Trump administration park funding hold', categories: ['Travel', 'News & Politics'] })).toBe('News & Politics')
+    expect(classifySerpApiDiscoveryCategory({ query: 'miami international airport', categories: [], rawCategories: ['Other'] })).toBe('Travel')
+    expect(classifySerpApiDiscoveryCategory({ query: 'ambiguous Other', categories: [], rawCategories: ['Other'] })).toBeNull()
+    expect(classifyPersistedSerpApiDiscoveryCategory({ query: 'Trump administration', categories: [], unmappedCategories: ['Law and Government'] })).toEqual({ category: 'News & Politics', source: 'provider-metadata' })
+  })
+
+  it.each([
+    ['Autos and Vehicles', 'Cars'], ['Business and Finance', 'Business'], ['Climate', 'Science'], ['Entertainment', 'Entertainment'],
+    ['Food and Drink', 'Lifestyle'], ['Games', 'Gaming'], ['Jobs and Education', 'Business'], ['Law and Government', 'News & Politics'],
+    ['Other', null], ['Politics', 'News & Politics'], ['Science', 'Science'], ['Sports', 'Sports'], ['Technology', 'Technology'], ['Travel and Transportation', 'Travel'],
+  ])('maps provider tag %s to %s without a catch-all', (providerTag, expected) => {
+    expect(mapSerpApiCategory(providerTag)).toBe(expected)
   })
 
   it('surfaces sanitized authentication/provider failures without returning the request URL or key', async () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 401, json: async () => ({ error: 'authorization=sb_secret_should_not_leak' }) }))
-    const client = createSerpApiTrendingNowClient({ env: { SERPAPI_API_KEY: 'private-key' }, fetchImpl })
+    const client = createSerpApiTrendingNowClient({ env: { SERPAPI_API_KEY: 'private-key' }, fetchImpl, maxRetries: 0 })
     await expect(client.discover({ geo: 'US', geographicScope: geography })).rejects.toBeInstanceOf(LiveProviderError)
     try { await client.discover({ geo: 'US', geographicScope: geography }) } catch (error) {
       expect(error.message).not.toContain('sb_secret_should_not_leak')
@@ -110,7 +180,14 @@ describe('DataForSEO Trends server transport', () => {
     ], geographicScope: geography, retrievedAt: '2026-08-26T00:05:00.000Z', adapter: adapter() })
     expect(result.histories[0].observations[0]).toMatchObject({ availability: 'missing', interest: null, missingReason: 'invalid-provider-measurement' })
     expect(result.histories[1].observations[0]).toMatchObject({ availability: 'missing', interest: null, missingReason: 'out-of-range' })
-    expect(result.diagnostics).toEqual({ invalidOrMissingMeasurements: 1, affectedCandidates: 1 })
+    expect(result.diagnostics).toMatchObject({
+      totalGraphPoints: 4,
+      positiveMeasurements: 2,
+      zeroMeasurements: 1,
+      invalidOrMissingMeasurements: 1,
+      affectedCandidates: 1,
+      candidateDiagnostics: expect.arrayContaining([expect.objectContaining({ canonicalQuery: 'Space Launch', graphPointCount: 2 })]),
+    })
   })
 
   it('keeps valid candidate histories when another candidate has a bad graph cell, while malformed graph rows still fail', () => {
@@ -121,7 +198,7 @@ describe('DataForSEO Trends server transport', () => {
     ], geographicScope: geography, retrievedAt: '2026-08-26T00:05:00.000Z', adapter: adapter() })
     expect(result.histories[1].observations.every((point) => point.availability === 'available' || point.missingReason === 'out-of-range')).toBe(true)
     const malformed = structuredClone(dataForSeoResponse); malformed.tasks[0].result[0].items[0].data[0].values = [1]
-    expect(() => normalizeDataForSeoMeasurement({ response: malformed, candidates: [{ query: 'Space Launch', normalizedQuery: 'space launch', category: 'Technology' }, { query: 'Orbit', normalizedQuery: 'orbit', category: 'Technology' }], geographicScope: geography, retrievedAt: '2026-08-26T00:05:00.000Z', adapter: adapter() })).toThrow(/values do not match requested keywords/)
+    expect(() => normalizeDataForSeoMeasurement({ response: malformed, candidates: [{ query: 'Space Launch', normalizedQuery: 'space launch', category: 'Technology' }, { query: 'Orbit', normalizedQuery: 'orbit', category: 'Technology' }], geographicScope: geography, retrievedAt: '2026-08-26T00:05:00.000Z', adapter: adapter() })).toThrow(/values do not match returned keywords/)
   })
 
   it('rejects malformed responses, including valid result envelopes without a trends graph, and sanitizes provider errors', async () => {

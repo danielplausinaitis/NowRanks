@@ -44,4 +44,25 @@ describe('historical vault growth', () => {
     const measurements = hourlyCanonical('2026-01-02T00:00:00.000Z', values).filter((_, index) => ![12, 13, 14, 15].includes(index))
     expect(evaluateVaultGrowth({ measurements, window: '24H', asOf: '2026-01-02T23:00:00.000Z', slotMinutes: 60 }).reason).toBe('insufficient-recent-coverage')
   })
+
+  it('calculates exact uncapped 7D canonical Growth from 168 hourly slots per half', () => {
+    const values = [...Array(168).fill(10), ...Array(168).fill(1_100)]
+    const result = evaluateVaultGrowth({ measurements: hourlyCanonical('2026-01-01T00:00:00.000Z', values), window: '7D', asOf: '2026-01-14T23:00:00.000Z', slotMinutes: 60 })
+    expect(result).toMatchObject({ status: 'available', growthSource: 'nowranks-history', growthPercent: 10_900, recent: { expected: 168, actual: 168 }, previous: { expected: 168, actual: 168 } })
+  })
+
+  it('requires 126 of 168 canonical hourly slots in each 7D half without treating missing slots as zero', () => {
+    const points = hourlyCanonical('2026-01-01T00:00:00.000Z', [...Array(168).fill(10), ...Array(168).fill(20)])
+    const passing = points.filter((_, index) => !(index < 42 || (index >= 168 && index < 210)))
+    const belowRecent = passing.filter((_, index) => index !== 126)
+    const asOf = '2026-01-14T23:00:00.000Z'
+    expect(evaluateVaultGrowth({ measurements: passing, window: '7D', asOf, slotMinutes: 60 })).toMatchObject({ status: 'available', growthPercent: 100, recent: { actual: 126, expected: 168 }, previous: { actual: 126, expected: 168 } })
+    expect(evaluateVaultGrowth({ measurements: belowRecent, window: '7D', asOf, slotMinutes: 60 }).reason).toBe('insufficient-recent-coverage')
+  })
+
+  it.each([[10, 5, 100], [5, 10, -50], [10, 0, null]])('preserves exact positive and negative 7D Growth while rejecting a zero baseline', (recent, previous, expected) => {
+    const result = evaluateVaultGrowth({ measurements: hourlyCanonical('2026-01-01T00:00:00.000Z', [...Array(168).fill(previous), ...Array(168).fill(recent)]), window: '7D', asOf: '2026-01-14T23:00:00.000Z', slotMinutes: 60 })
+    if (expected === null) expect(result.reason).toBe('zero-baseline')
+    else expect(result).toMatchObject({ status: 'available', growthPercent: expected })
+  })
 })

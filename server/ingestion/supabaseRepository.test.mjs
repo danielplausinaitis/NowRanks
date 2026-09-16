@@ -95,4 +95,19 @@ describe('Supabase live ingestion repository', () => {
     expect(calls[0].selection).toContain('idempotency_key')
     expect(calls[0].selection).not.toContain('cycle_id')
   })
+
+  it('pages canonical attention cohorts so a mature 7D public board is not truncated at the Data API limit', async () => {
+    const ranges = []
+    const supabase = { from() {
+      const query = {
+        select: vi.fn(() => query), in: vi.fn(() => query), eq: vi.fn(() => query), gte: vi.fn(() => query), lte: vi.fn(() => query), order: vi.fn(() => query),
+        range: vi.fn(async (from, to) => { ranges.push([from, to]); return { data: from === 0 ? Array.from({ length: 1_000 }, (_, index) => ({ point_id: index })) : [{ point_id: from }], error: null } }),
+      }
+      return query
+    } }
+    const repository = createSupabaseIngestionRepository(supabase)
+    const rows = await repository.listLiveCanonicalAttentionPoints({ candidateIds: ['one', 'two'] })
+    expect(rows).toHaveLength(1_001)
+    expect(ranges).toEqual([[0, 999], [1000, 1999]])
+  })
 })

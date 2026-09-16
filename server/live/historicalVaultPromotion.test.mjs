@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { evaluate24hGrowthPromotion } from './historicalVaultPromotion.mjs'
+import { evaluateCanonicalGrowthPromotion } from './historicalVaultPromotion.mjs'
 
 function growth(patch = {}) {
   return {
@@ -46,5 +47,23 @@ describe('24H historical Growth public-promotion gate', () => {
   it('does not treat a missing canonical slot as zero coverage', () => {
     const missing = growth({ recent: { expected: 12, actual: 8, values: Array(8).fill(20) } })
     expect(gate(missing)).toMatchObject({ eligible: false, reason: 'insufficient-recent-coverage' })
+  })
+
+  it('promotes qualifying 7D canonical Growth in preferred mode and leaves it diagnostic-only in shadow mode', () => {
+    const sevenDay = growth({ recent: { expected: 168, actual: 126, values: Array(126).fill(20) }, previous: { expected: 168, actual: 126, values: Array(126).fill(10) } })
+    expect(evaluateCanonicalGrowthPromotion({ window: '7D', vaultGrowth: sevenDay, mode: 'preferred' })).toMatchObject({ eligible: true, promotedInPreferred: true, promotionOutcome: 'promoted-in-preferred' })
+    expect(evaluateCanonicalGrowthPromotion({ window: '7D', vaultGrowth: sevenDay, mode: 'shadow' })).toMatchObject({ eligible: true, wouldPromoteInShadow: true, promotedInPreferred: false, promotionOutcome: 'would-promote-in-shadow' })
+  })
+
+  it('requires complete 7D halves for medium alignment and keeps 30D and 1Y unsupported', () => {
+    const sevenDay = growth({ recentAlignmentConfidence: 'medium', recent: { expected: 168, actual: 126, values: Array(126).fill(20) }, previous: { expected: 168, actual: 126, values: Array(126).fill(10) } })
+    expect(evaluateCanonicalGrowthPromotion({ window: '7D', vaultGrowth: sevenDay, mode: 'preferred' })).toMatchObject({ eligible: false, reason: 'medium-confidence-requires-complete-coverage' })
+    expect(evaluateCanonicalGrowthPromotion({ window: '30D', vaultGrowth: growth(), mode: 'preferred' })).toMatchObject({ eligible: false, reason: 'unsupported-window' })
+    expect(evaluateCanonicalGrowthPromotion({ window: '1Y', vaultGrowth: growth(), mode: 'preferred' })).toMatchObject({ eligible: false, reason: 'unsupported-window' })
+  })
+
+  it('retains a distinct no-canonical-history diagnostic for an immature 7D candidate', () => {
+    expect(evaluateCanonicalGrowthPromotion({ window: '7D', vaultGrowth: growth({ status: 'unavailable', reason: 'no-canonical-history', growthPercent: null }), mode: 'preferred' }))
+      .toMatchObject({ eligible: false, reason: 'no-canonical-history', promotionOutcome: 'fallback' })
   })
 })

@@ -2,6 +2,7 @@ const WINDOWS = new Set(['24H', '7D', '30D', '1Y'])
 const LEGACY_LANES = new Set(['established', 'emerging'])
 export const LEGACY_SNAPSHOT_FORMAT_VERSION = 1
 export const UNIFIED_SNAPSHOT_FORMAT_VERSION = 2
+export const PUBLIC_TOP_COUNT = 20
 import { isTrendHeat } from './trendPresentation.mjs'
 
 export class LiveSnapshotNotFoundError extends Error {
@@ -28,13 +29,35 @@ function mapPublicSnapshot(row, selectedWindow, cycleId) {
   if (row?.ingestion_runs?.status !== 'succeeded') throw new LiveSnapshotNotFoundError({ selectedWindow, cycleId })
   return requireRequestedWindow(mapSnapshot(row), selectedWindow, cycleId)
 }
+function legacyHeatDiagnostics(trendHeat) {
+  return trendHeat === null
+    ? { heatStatus: 'pending', heatLevel: null, heatEvidenceAvailable: false, heatEvidenceSource: null, heatFallbackUsed: false, heatPendingReason: 'legacy-heat-diagnostics-unavailable' }
+    : { heatStatus: 'available', heatLevel: trendHeat, heatEvidenceAvailable: true, heatEvidenceSource: 'legacy-heat-source-not-recorded', heatFallbackUsed: false, heatPendingReason: null }
+}
+function mapHeatDiagnostics(presentation, trendHeat) {
+  const diagnostics = presentation.heatDiagnostics
+  const valid = diagnostics && typeof diagnostics === 'object'
+    && ['available', 'pending'].includes(diagnostics.heatStatus)
+    && diagnostics.heatEvidenceAvailable === (diagnostics.heatStatus === 'available')
+    && typeof diagnostics.heatFallbackUsed === 'boolean'
+    && (diagnostics.heatStatus === 'available'
+      ? isTrendHeat(diagnostics.heatLevel) && diagnostics.heatLevel !== null && typeof diagnostics.heatEvidenceSource === 'string' && diagnostics.heatPendingReason === null
+      : diagnostics.heatLevel === null && diagnostics.heatEvidenceSource === null && typeof diagnostics.heatPendingReason === 'string')
+  if (!valid) return legacyHeatDiagnostics(trendHeat)
+  // The level displayed to the public must always be the exact persisted
+  // presentation level, never a read-time re-computation.
+  if (diagnostics.heatLevel !== trendHeat) return legacyHeatDiagnostics(trendHeat)
+  return diagnostics
+}
 function mapCommonEntry(row, snapshot) {
   const candidate = row?.candidates
   assert(row?.snapshot_id === snapshot.snapshotId, 'entry references a different snapshot')
   assert(candidate?.candidate_id === row.candidate_id && candidate.query_text, `entry ${row?.snapshot_entry_id ?? 'unknown'} has incomplete candidate identity`)
   assert(typeof row.confidence_reason === 'string' && row.confidence_reason.trim(), `entry ${row.snapshot_entry_id} has no confidence reason`)
   const presentation = row.component_availability?.presentation ?? {}
-  return { candidateId: row.candidate_id, query: candidate.query_text, title: candidate.query_text, normalizedQuery: candidate.normalized_query, category: candidate.category, classification: row.classification, confidence: row.confidence, confidenceReason: row.confidence_reason, scoreBasis: row.score_basis, historyObservationCount: row.history_observation_count, historyAvailableCount: row.history_available_count, historyCoveragePercentage: row.history_coverage_percentage, searchInterest: row.search_interest_component, componentAvailability: row.component_availability, growthPercent: Number.isFinite(presentation.growthPercent) ? presentation.growthPercent : null, growthSource: ['nowranks-history', 'provider-history', 'discovery-increase', 'unavailable'].includes(presentation.growthSource) ? presentation.growthSource : 'unavailable', growthSaturated: presentation.growthSaturated === true, trendHeat: isTrendHeat(presentation.trendHeat) ? presentation.trendHeat : null, scoredAt: snapshot.scoredAt, cycleId: snapshot.cycleId, selectedWindow: snapshot.selectedWindow }
+  const trendHeat = isTrendHeat(presentation.trendHeat) ? presentation.trendHeat : null
+  const heatDiagnostics = mapHeatDiagnostics(presentation, trendHeat)
+  return { candidateId: row.candidate_id, query: candidate.query_text, title: candidate.query_text, normalizedQuery: candidate.normalized_query, category: candidate.category, classification: row.classification, confidence: row.confidence, confidenceReason: row.confidence_reason, scoreBasis: row.score_basis, historyObservationCount: row.history_observation_count, historyAvailableCount: row.history_available_count, historyCoveragePercentage: row.history_coverage_percentage, searchInterest: row.search_interest_component, componentAvailability: row.component_availability, growthPercent: Number.isFinite(presentation.growthPercent) ? presentation.growthPercent : null, growthSource: ['nowranks-history', 'provider-history', 'discovery-increase', 'unavailable'].includes(presentation.growthSource) ? presentation.growthSource : 'unavailable', growthSaturated: presentation.growthSaturated === true, trendHeat, ...heatDiagnostics, scoredAt: snapshot.scoredAt, cycleId: snapshot.cycleId, selectedWindow: snapshot.selectedWindow }
 }
 function mapLegacyEntry(row, snapshot) {
   assert(LEGACY_LANES.has(row.score_lane), `entry ${row.snapshot_entry_id} has invalid legacy score lane`)
@@ -52,6 +75,11 @@ function mapUnifiedEntry(row, snapshot) {
   assert(row.score_basis === 'unified-public', `entry ${row.snapshot_entry_id} has invalid unified score basis`)
   assert(row.lane_rank === null && row.overall_score === null && row.established_trending_score === null && row.emerging_trending_score === null, `entry ${row.snapshot_entry_id} mixes legacy and unified score fields`)
   return { ...mapCommonEntry(row, snapshot), publicRank: row.public_rank, publicScore: row.public_score, evidenceStatus: row.evidence_status }
+}
+async function hasCompleteUnifiedPublicBoard({ repository, snapshot }) {
+  const entries = (await repository.listLiveSnapshotEntries({ snapshotId: snapshot.snapshotId })).flatMap((row) => row?.score_lane === 'unified' ? [mapUnifiedEntry(row, snapshot)] : [])
+  validateUnique(entries, 'publicRank', 'public')
+  return entries.length === PUBLIC_TOP_COUNT && entries.every((entry) => entry.publicRank >= 1 && entry.publicRank <= PUBLIC_TOP_COUNT)
 }
 function validateUnique(entries, rankKey, label) { const ranks = new Set(); const candidates = new Set(); for (const entry of entries) { if (ranks.has(entry[rankKey])) malformed(`duplicate ${label} rank ${entry[rankKey]}`); if (candidates.has(entry.candidateId)) malformed(`duplicate candidate ${entry.candidateId}`); ranks.add(entry[rankKey]); candidates.add(entry.candidateId) } }
 function validateLegacyEntries(entries) { const ranks = { established: new Set(), emerging: new Set() }; const candidates = new Set(); for (const entry of entries) { if (ranks[entry.scoreLane].has(entry.laneRank)) malformed(`duplicate ${entry.scoreLane} lane rank ${entry.laneRank}`); if (candidates.has(entry.candidateId)) malformed(`duplicate candidate ${entry.candidateId} across live lanes`); ranks[entry.scoreLane].add(entry.laneRank); candidates.add(entry.candidateId) } }
@@ -92,10 +120,20 @@ async function readUnifiedSnapshot({ repository, snapshot }) {
 export async function readLiveLeaderboard({ repository, selectedWindow = '24H', cycleId } = {}) {
   if (!repository) throw new Error('A live snapshot repository is required')
   if (!WINDOWS.has(selectedWindow)) throw new Error('Live read window must be 24H, 7D, 30D, or 1Y')
-  const header = cycleId
+  let header = cycleId
     ? await repository.getUnifiedLiveSnapshot({ cycleId, selectedWindow })
     : await repository.getLatestUnifiedLiveSnapshot({ selectedWindow })
-  if (!header) throw new LiveSnapshotNotFoundError({ selectedWindow, cycleId })
-  const snapshot = mapPublicSnapshot(header, selectedWindow, cycleId)
-  return readUnifiedSnapshot({ repository, snapshot })
+  const seenSnapshotIds = new Set()
+  while (header) {
+    const snapshot = mapPublicSnapshot(header, selectedWindow, cycleId)
+    if (seenSnapshotIds.has(snapshot.snapshotId)) break
+    seenSnapshotIds.add(snapshot.snapshotId)
+    if (await hasCompleteUnifiedPublicBoard({ repository, snapshot })) return readUnifiedSnapshot({ repository, snapshot })
+    // An explicit cycle request must never silently substitute another run. The
+    // default read may skip an old, accidentally persisted partial v2 snapshot,
+    // but only to an earlier succeeded v2 snapshot for this exact horizon.
+    if (cycleId) break
+    header = await repository.getPreviousUnifiedLiveSnapshot({ selectedWindow, beforeScoredAt: snapshot.scoredAt })
+  }
+  throw new LiveSnapshotNotFoundError({ selectedWindow, cycleId })
 }

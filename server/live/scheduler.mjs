@@ -10,6 +10,7 @@ export const DEFAULT_SCHEDULER_STALE_AFTER_MINUTES = 300
 
 const WINDOWS = ['24H', '7D', '30D', '1Y']
 const RANGES = { '24H': 'past_day', '7D': 'past_7_days', '30D': 'past_30_days', '1Y': 'past_12_months' }
+export const HORIZON_UTC_HOURS = Object.freeze({ '24H': Object.freeze([0, 4, 8, 12, 16, 20]), '7D': Object.freeze([0, 8, 16]), '30D': Object.freeze([0]), '1Y': Object.freeze([0]) })
 const RETRYABLE_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT'])
 const NON_RETRYABLE_MESSAGE = /(?:LIVE_[A-Z_]+|ALLOW_LIVE_DATABASE_WRITE|must be|required|invalid|configuration|cost cap|exceeds LIVE_MAX_PROVIDER_COST_USD|unauthori[sz]ed|forbidden|HTTP 4\d\d)/i
 
@@ -33,6 +34,12 @@ function boundedInteger(value, name, fallback, { min, max }) {
   const number = value === undefined || value === '' ? fallback : Number(value)
   if (!Number.isInteger(number) || number < min || number > max) throw new Error(`${name} must be an integer between ${min} and ${max}`)
   return number
+}
+
+function exactHours(value, name, fallback) {
+  const hours = boundedInteger(value, name, fallback, { min: 1, max: 24 })
+  if (24 % hours !== 0) throw new Error(`${name} must divide 24 hours exactly`)
+  return hours
 }
 
 function iso(date) {
@@ -65,15 +72,26 @@ export function schedulerCycleId({ slot, window }) {
   return `scheduled:${schedulerSlotId(slot)}:${window}`
 }
 
+export function dueHorizonJobs({ slot = new Date(), config = null } = {}) {
+  const hour = new Date(iso(slot)).getUTCHours()
+  return WINDOWS.filter((window) => HORIZON_UTC_HOURS[window].includes(hour)).map((window) => ({ window, providerRange: RANGES[window], cycleId: schedulerCycleId({ slot, window }) }))
+}
+
 export function resolveLiveSchedulerConfig(env = process.env) {
   const cohort = resolveLiveIngestionSafetyConfig(env)
   const refreshIntervalMinutes = positive(env.LIVE_REFRESH_INTERVAL_MINUTES, 'LIVE_REFRESH_INTERVAL_MINUTES', FIXED_UTC_SLOT_MINUTES)
   if (refreshIntervalMinutes !== FIXED_UTC_SLOT_MINUTES) throw new Error(`LIVE_REFRESH_INTERVAL_MINUTES must be exactly ${FIXED_UTC_SLOT_MINUTES} for fixed UTC scheduler slots`)
+  const discoveryRefreshHours = exactHours(env.LIVE_DISCOVERY_REFRESH_INTERVAL_HOURS, 'LIVE_DISCOVERY_REFRESH_INTERVAL_HOURS', 24)
+  const baselineRefreshHours = exactHours(env.LIVE_BASELINE_REFRESH_INTERVAL_HOURS, 'LIVE_BASELINE_REFRESH_INTERVAL_HOURS', 24)
+  if (discoveryRefreshHours !== 24 || baselineRefreshHours !== 24) throw new Error('Production shared discovery and baseline refresh intervals must be exactly 24 hours')
   return {
     enabled: bool(env.LIVE_SCHEDULER_ENABLED, 'LIVE_SCHEDULER_ENABLED', false),
     refreshIntervalMinutes,
     baselineTtlHours: positive(env.LIVE_BASELINE_TTL_HOURS, 'LIVE_BASELINE_TTL_HOURS', 24),
     historyTtlHours: positive(env.LIVE_HISTORY_TTL_HOURS, 'LIVE_HISTORY_TTL_HOURS', 4),
+    googleTrendsRefreshMinutes: positive(env.LIVE_GOOGLE_TRENDS_REFRESH_MINUTES, 'LIVE_GOOGLE_TRENDS_REFRESH_MINUTES', 480),
+    discoveryRefreshHours,
+    baselineRefreshHours,
     retryLimit: boundedInteger(env.LIVE_SCHEDULER_RETRY_LIMIT, 'LIVE_SCHEDULER_RETRY_LIMIT', DEFAULT_SCHEDULER_RETRY_LIMIT, { min: 0, max: 5 }),
     retryBaseDelaySeconds: boundedInteger(env.LIVE_SCHEDULER_RETRY_BASE_DELAY_SECONDS, 'LIVE_SCHEDULER_RETRY_BASE_DELAY_SECONDS', DEFAULT_SCHEDULER_RETRY_BASE_DELAY_SECONDS, { min: 1, max: 900 }),
     staleAfterMinutes: boundedInteger(env.LIVE_SCHEDULER_STALE_AFTER_MINUTES, 'LIVE_SCHEDULER_STALE_AFTER_MINUTES', DEFAULT_SCHEDULER_STALE_AFTER_MINUTES, { min: FIXED_UTC_SLOT_MINUTES, max: 1_440 }),
@@ -86,26 +104,35 @@ export function resolveLiveSchedulerConfig(env = process.env) {
 export function schedulePlan({ env = process.env, now = new Date() } = {}) {
   const config = resolveLiveSchedulerConfig(env)
   const slot = schedulerSlotId(now)
-  const windowCount = WINDOWS.length
-  const trendsRequests = config.maxPaidCandidates * windowCount
+  const slotDate = utcSchedulerSlot(now)
+  const horizonJobs = dueHorizonJobs({ slot: slotDate, config })
+  const windowCount = horizonJobs.length
+  const discoveryDue = slotDate.getUTCHours() === 0
+  const adaptive7dCandidates = Math.max(0, config.adaptive7dMaxCandidates - config.maxPaidCandidates)
+  // The extra 7D candidates are conditional at runtime, but cost-cap preflight
+  // must account for their bounded worst case rather than authorizing a run on
+  // the normal 50-topic estimate alone.
+  const trendsRequests = horizonJobs.reduce((total, { window }) => total + config.maxPaidCandidates + (window === '7D' ? adaptive7dCandidates : 0), 0)
   const trendsCost = trendsRequests * DATAFORSEO_TRENDS_SINGLE_TOPIC_REQUEST_COST_USD
-  const baselineCost = DATAFORSEO_SEARCH_VOLUME_BULK_REQUEST_COST_USD
-  const baselineRefreshFraction = Math.min(1, config.refreshIntervalMinutes / (config.baselineTtlHours * 60))
+  const baselineCost = discoveryDue ? DATAFORSEO_SEARCH_VOLUME_BULK_REQUEST_COST_USD : 0
   const coldCost = trendsCost + baselineCost
   const warmCost = trendsCost
-  const steadyCost = trendsCost + baselineCost * baselineRefreshFraction
-  const cyclesPerDay = 24 * 60 / config.refreshIntervalMinutes
-  const baselineRefreshesPerMonth = Math.min(cyclesPerDay, 24 / config.baselineTtlHours) * 30
-  const monthly = (count) => (count * windowCount * DATAFORSEO_TRENDS_SINGLE_TOPIC_REQUEST_COST_USD * cyclesPerDay * 30) + (baselineCost * baselineRefreshesPerMonth)
+  const steadyCost = coldCost
+  const dailyTrendCandidates = config.maxPaidCandidates * 11 + adaptive7dCandidates
+  const dailyTrendsCost = dailyTrendCandidates * DATAFORSEO_TRENDS_SINGLE_TOPIC_REQUEST_COST_USD
+  const monthly = (count) => ((count * 11 + Math.max(0, config.adaptive7dMaxCandidates - count)) * DATAFORSEO_TRENDS_SINGLE_TOPIC_REQUEST_COST_USD * 30) + DATAFORSEO_SEARCH_VOLUME_BULK_REQUEST_COST_USD * 30
   return {
     config,
     cycleSlot: slot,
     nextScheduledUtcRun: compactIso(nextUtcSchedulerSlot(now)),
     utcSlots: FIXED_UTC_SLOT_HOURS,
-    windows: WINDOWS.map((window) => ({ window, providerRange: RANGES[window], cycleId: schedulerCycleId({ slot: now, window }) })),
+    windows: horizonJobs,
+    discoveryDue,
     estimates: {
-      windowCount, serpApiRequests: 1, trendsRequests, trendsCostUsd: usd(trendsCost),
-      baseline: { coldRequests: 1, warmRequests: 0, coldCostUsd: usd(baselineCost), warmCostUsd: 0, steadyCostUsd: usd(baselineCost * baselineRefreshFraction), requestsAvoidedSteadyState: Number(Math.max(0, 1 - baselineRefreshFraction).toFixed(4)) },
+      windowCount, serpApiRequests: discoveryDue ? 5 : 0, trendsRequests, trendsCostUsd: usd(trendsCost),
+      baseline: { coldRequests: discoveryDue ? 1 : 0, warmRequests: 0, coldCostUsd: usd(baselineCost), warmCostUsd: 0, steadyCostUsd: usd(baselineCost), requestsAvoidedSteadyState: discoveryDue ? 0 : 1 },
+      adaptive7dOverflow: { maximumAdditionalCandidates: adaptive7dCandidates, maximumAdditionalTrendsRequests: adaptive7dCandidates, maximumAdditionalBaselineRequests: 0, triggeredOnly: true },
+      daily: { discoveryCycles: 1, serpApiRequests: 5, estimatedMonthlySerpApiRequests: 150, baselineRefreshes: 1, horizonRefreshes: { '24H': 6, '7D': 3, '30D': 1, '1Y': 1 }, trendsCandidateMaximum: dailyTrendCandidates, trendsCostUsd: usd(dailyTrendsCost) },
       warmInvocationCostUsd: usd(warmCost), coldCycleCostUsd: usd(coldCost), steadyCycleCostUsd: usd(steadyCost),
       estimatedMonthlyCostUsd: { configuredMaximum: usd(monthly(config.maxPaidCandidates)), candidates10: usd(monthly(10)), candidates50: usd(monthly(50)), candidates100: usd(monthly(100)) },
     },
@@ -141,11 +168,19 @@ export async function runScheduledOnce({ env = process.env, now = new Date(), is
   if (typeof runIngestion !== 'function') throw new Error('A live ingestion runner is required')
   const executionEnv = { ...env, LIVE_INGEST_DRY_RUN: 'false' }
   const shared = await prepareShared(executionEnv, plan)
-  const results = []
-  for (const item of pending) results.push(await runIngestion({ ...executionEnv, LIVE_INGEST_CYCLE_ID: item.cycleId, LIVE_INGEST_HISTORY_WINDOW: item.window }, shared))
+  // Horizons share their dependency but not their result. Run all due jobs so
+  // a 7D/30D failure never prevents a due 24H cycle from completing.
+  const settled = await Promise.allSettled(pending.map((item) => runIngestion({ ...executionEnv, LIVE_INGEST_CYCLE_ID: item.cycleId, LIVE_INGEST_HISTORY_WINDOW: item.window }, shared)))
+  const failures = settled.flatMap((result, index) => result.status === 'rejected' ? [{ window: pending[index].window, error: result.reason }] : [])
+  if (failures.length) {
+    const error = new Error(`Scheduled horizon failure: ${failures.map(({ window, error: cause }) => `${window}=${String(cause?.message ?? cause)}`).join('; ')}`)
+    error.horizonFailures = failures
+    throw error
+  }
+  const results = settled.map((result) => result.value)
   const sharedMetrics = shared?.sharedInputs?.sharedMetrics ?? {}
-  const windows = results.map((result, index) => ({ window: pending[index].window, trends: result?.requestMetrics?.providerRequests?.dataForSeoTrends ?? 0, trendsCost: result?.requestMetrics?.providerCosts?.trends ?? 0 }))
-  const aggregate = { serpApi: sharedMetrics.providerRequests?.serpApi ?? 0, dataForSeoSearchVolume: sharedMetrics.providerRequests?.dataForSeoSearchVolume ?? 0, dataForSeoTrends: windows.reduce((sum, row) => sum + row.trends, 0), dataForSeoCost: usd((sharedMetrics.providerCosts?.searchVolume ?? 0) + windows.reduce((sum, row) => sum + row.trendsCost, 0)) }
+  const windows = results.map((result, index) => ({ window: pending[index].window, baseline: Math.max(0, (result?.requestMetrics?.providerRequests?.dataForSeoSearchVolume ?? 0) - (sharedMetrics.providerRequests?.dataForSeoSearchVolume ?? 0)), baselineCost: Math.max(0, (result?.requestMetrics?.providerCosts?.searchVolume ?? 0) - (sharedMetrics.providerCosts?.searchVolume ?? 0)), trends: result?.requestMetrics?.providerRequests?.dataForSeoTrends ?? 0, trendsCost: result?.requestMetrics?.providerCosts?.trends ?? 0 }))
+  const aggregate = { serpApi: sharedMetrics.providerRequests?.serpApi ?? 0, dataForSeoSearchVolume: (sharedMetrics.providerRequests?.dataForSeoSearchVolume ?? 0) + windows.reduce((sum, row) => sum + row.baseline, 0), dataForSeoTrends: windows.reduce((sum, row) => sum + row.trends, 0), dataForSeoCost: usd((sharedMetrics.providerCosts?.searchVolume ?? 0) + windows.reduce((sum, row) => sum + row.baselineCost + row.trendsCost, 0)) }
   return { plan, results, skipped, providerSummary: { shared: { serpApi: aggregate.serpApi, dataForSeoSearchVolume: aggregate.dataForSeoSearchVolume }, windows, aggregate } }
 }
 
@@ -202,7 +237,7 @@ export function createLiveSchedulerController({ env = process.env, now = () => n
   const completedSlots = new Set()
   const runSlot = async ({ slot = now() } = {}) => {
     const slotId = schedulerSlotId(slot)
-    const cycleIds = WINDOWS.map((window) => schedulerCycleId({ slot, window }))
+    const cycleIds = dueHorizonJobs({ slot, config }).map(({ cycleId }) => cycleId)
     const startedAt = iso(now())
     if (!config.enabled) {
       const event = diagnostic({ slot: slotId, cycleIds, startedAt, finishedAt: iso(now()), status: 'skipped', retryCount: 0, reason: 'scheduler-disabled' })

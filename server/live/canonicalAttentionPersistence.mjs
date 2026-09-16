@@ -3,6 +3,8 @@ import { stableUuid } from '../ingestion/persistence.mjs'
 import { alignCanonicalAttention, CANONICAL_ATTENTION_ALGORITHM_VERSION, CANONICAL_ATTENTION_METRIC } from './canonicalAttentionAlignment.mjs'
 import { canonicalQueryFingerprint, comparabilityFingerprint, utcSchedulerSlot } from './historicalVault.mjs'
 
+const CANONICAL_TRENDS_PROVIDERS = new Set(['dataforseo-trends', 'dataforseo-google-trends'])
+
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable)
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]))
@@ -36,13 +38,24 @@ function compareSegmentAttempts(left, right) {
 }
 
 function rawCurve(history) {
-  return (history.observations ?? []).map((point) => ({
+  return (history.rawProviderObservations ?? history.observations ?? []).map((point) => ({
     observedAt: point.observedAt,
     value: point.availability === 'available' && Number.isFinite(point.interest) ? point.interest : null,
     availability: point.availability,
     missingReason: point.missingReason ?? null,
     providerBucketStart: point.providerBucketStart ?? null,
     providerBucketEnd: point.providerBucketEnd ?? null,
+    ...(Object.hasOwn(point, 'rawProviderValue') ? { rawProviderValue: point.rawProviderValue } : {}),
+  }))
+}
+
+function canonicalCurve(history) {
+  const source = history.canonicalObservations ?? history.observations ?? []
+  return source.map((point) => ({
+    observedAt: point.observedAt,
+    value: point.availability === 'available' && Number.isFinite(point.interest) ? point.interest : null,
+    availability: point.availability,
+    missingReason: point.missingReason ?? null,
   }))
 }
 
@@ -57,8 +70,17 @@ function seriesIdentity(history, canonicalTargeting = {}) {
     locationCoordinate: canonicalTargeting.locationCoordinate ?? null,
     languageCode: canonicalTargeting.languageCode ?? null,
     languageName: canonicalTargeting.languageName ?? null,
+    measurementMode: canonicalTargeting.measurementMode ?? history.measurementProvenance?.measurementMode ?? 'us',
+    measurementTarget: canonicalTargeting.measurementTarget ?? history.measurementProvenance?.measurementTarget ?? null,
+    measurementLocation: canonicalTargeting.measurementLocation ?? history.measurementProvenance?.measurementLocation ?? null,
+    measurementLanguage: canonicalTargeting.measurementLanguage ?? history.measurementProvenance?.measurementLanguage ?? null,
     queryMode: history.provenance?.collectionMethod ?? 'dataforseo-trends-explore-live',
     sourceVersion: history.provenance?.sourceVersion ?? null,
+    // A Google multi-keyword request has a relative scale determined by all members.
+    // Never resume/stitch a canonical segment when that batch composition changes.
+    googleTrendsBatchFingerprint: history.batch?.fingerprint ?? null,
+    googleTrendsKeywordIndex: history.batch?.keywordIndex ?? null,
+    ...(history.canonicalAggregation ? { canonicalAggregation: history.canonicalAggregation } : {}),
   }
   const seriesKey = comparabilityFingerprint({
     providerId: history.provenance?.providerId ?? 'dataforseo-trends', metricKey: CANONICAL_ATTENTION_METRIC,
@@ -79,7 +101,7 @@ export function buildCanonicalAttentionPersistencePlan({ histories, candidateIdB
   if (!Array.isArray(histories)) throw new Error('Canonical histories must be an array')
   const slotAt = utcSchedulerSlot(scoredAt, slotMinutes)
   for (const history of histories) {
-    if (history?.historyRequest?.timeRange !== 'past_day' || history?.provenance?.providerId !== 'dataforseo-trends') continue
+    if (history?.historyRequest?.timeRange !== 'past_day' || !CANONICAL_TRENDS_PROVIDERS.has(history?.provenance?.providerId)) continue
     const candidateId = candidateIdByQuery.get(history.normalizedQuery)
     if (!candidateId) continue
     empty.diagnostics.eligibleCandidates += 1
@@ -88,14 +110,19 @@ export function buildCanonicalAttentionPersistencePlan({ histories, candidateIdB
       const artifactId = stableUuid(`canonical-curve:${runId}:${candidateId}:dataforseo-trends:past_day`)
       const artifact = {
         artifact_id: artifactId, ingestion_run_id: runId, candidate_id: candidateId,
-        provider_id: 'dataforseo-trends', provider_query: identity.providerQuery, query_fingerprint: identity.queryFingerprint,
-        slot_at: slotAt, retrieved_at: history.retrievedAt ?? scoredAt, targeting: identity.targeting,
-        request_window: 'past_day', normalization_scope: 'independently-normalized-dataforseo-trends-curve',
+        provider_id: history.provenance?.providerId ?? 'dataforseo-trends', provider_query: identity.providerQuery, query_fingerprint: identity.queryFingerprint,
+        slot_at: slotAt, retrieved_at: history.retrievedAt ?? scoredAt, targeting: {
+          ...identity.targeting,
+          ...(history.canonicalHourlyBuckets ? { canonicalHourlyBuckets: history.canonicalHourlyBuckets } : {}),
+        },
+        request_window: 'past_day', normalization_scope: history.canonicalAggregation?.aggregation === 'hourly-mean'
+          ? 'google-trends-high-resolution-to-hourly-mean'
+          : 'independently-normalized-dataforseo-trends-curve',
         algorithm_version: CANONICAL_ATTENTION_ALGORITHM_VERSION, raw_curve: rawCurve(history),
       }
       empty.artifacts.push(artifact); empty.diagnostics.rawArtifacts += 1
       const candidates = (existingByQuery.get(history.normalizedQuery) ?? []).filter((point) => point.series_key === identity.seriesKey)
-      const curve = rawCurve(history)
+      const curve = canonicalCurve(history)
       const bySegment = new Map()
       for (const point of candidates) {
         if (!bySegment.has(point.segment_id)) bySegment.set(point.segment_id, [])

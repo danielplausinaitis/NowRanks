@@ -39,18 +39,20 @@ export function evaluateColdStartTrending({
   historyCoverage,
   establishedEligible,
   maximumAgeHours = 24,
+  currentIntensity = candidate.currentTrendIntensity?.searchVolume,
+  acceleration = candidate.currentTrendIntensity?.increasePercentage,
 }) {
-  const increaseSignal = coldStartIncreaseSignal(candidate.currentTrendIntensity?.increasePercentage)
+  const increaseSignal = coldStartIncreaseSignal(acceleration)
   const age = trendAge(candidate, maximumAgeHours)
   const reasons = []
   if (establishedEligible) reasons.push('established-history-already-eligible')
   if (historyCoverage >= 0.8) reasons.push('history-is-not-sparse')
   if (searchInterest === null) reasons.push('search-interest-required')
   if (candidate.currentTrendIntensity?.active !== true) reasons.push('active-trend-required')
-  if (!Number.isFinite(candidate.currentTrendIntensity?.searchVolume) || candidate.currentTrendIntensity.searchVolume <= 0) reasons.push('positive-current-volume-required')
+  if (!Number.isFinite(currentIntensity) || currentIntensity <= 0) reasons.push('positive-current-volume-required')
   if (normalizedCurrentIntensity === null || normalizedCurrentIntensity < COLD_START_TRENDING.minimumNormalizedCurrentIntensity) reasons.push('current-intensity-below-cohort-midpoint')
-  if (!Number.isFinite(candidate.currentTrendIntensity?.increasePercentage)
-    || candidate.currentTrendIntensity.increasePercentage < COLD_START_TRENDING.minimumIncreasePercentage) reasons.push('increase-below-100-percent')
+  if (!Number.isFinite(acceleration)
+    || acceleration < COLD_START_TRENDING.minimumIncreasePercentage) reasons.push('increase-below-100-percent')
   if (!age) reasons.push('recent-valid-start-time-required')
 
   const eligible = reasons.length === 0
@@ -70,8 +72,8 @@ export function evaluateColdStartTrending({
     signals: {
       searchInterest,
       normalizedCurrentIntensity,
-      rawIncreasePercentage: candidate.currentTrendIntensity?.increasePercentage ?? null,
-      cappedIncreasePercentage: increaseSignal === null ? null : Math.min(candidate.currentTrendIntensity.increasePercentage, COLD_START_TRENDING.increaseSaturationPercentage),
+      rawIncreasePercentage: acceleration ?? null,
+      cappedIncreasePercentage: increaseSignal === null ? null : Math.min(acceleration, COLD_START_TRENDING.increaseSaturationPercentage),
       increaseSignal,
       ageHours: age?.ageHours ?? null,
       recencySignal: age?.recencySignal ?? null,

@@ -12,7 +12,10 @@ export async function executeProductionScheduledSlot({ env, repository, slot }) 
     env,
     now: slot,
     isWindowComplete: async ({ cycleId, window }) => (await repository.findRunByIdempotencyKey(liveIngestionIdentity({ cycleId, historyWindow: window }).idempotencyKey))?.status === 'succeeded',
-    prepareShared: (executionEnv) => prepareLiveSchedulerShared({ env: executionEnv, dependencies: { repository } }),
+    prepareShared: (executionEnv, plan) => prepareLiveSchedulerShared({
+      env: executionEnv, dependencies: { repository }, forceFreshDiscovery: plan.discoveryDue,
+      discoveryFreshnessHours: plan.config.discoveryRefreshHours, baselineRefreshHours: plan.config.baselineRefreshHours,
+    }),
     runIngestion: (executionEnv, shared) => runLiveIngestion({ env: executionEnv, dependencies: shared }),
   })
 }

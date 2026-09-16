@@ -1,8 +1,9 @@
 import { diagnoseHistoricalComponents } from './shadowTemporalDiagnostics.mjs'
 import { evaluateElapsedShadowHistory } from './elapsedShadowHistory.mjs'
 import { evaluateColdStartTrending } from './coldStartShadowScoring.mjs'
-import { resolveGrowthPresentation, trendHeat } from './trendPresentation.mjs'
+import { resolveGrowthPresentation, resolveTrendHeat } from './trendPresentation.mjs'
 import { boundedDiscoveryAcceleration, composeUnifiedPublicScore, nowScoreFromUnifiedRaw, recencyScore } from './unifiedPublicScoring.mjs'
+import { resolvePublicScoringInputs } from './globalPublicScoring.mjs'
 
 export const SHADOW_SEARCH_INTEREST_WEIGHTS = Object.freeze({ currentTrendIntensity: 0.7, baselineDemand: 0.3 })
 export const SHADOW_HISTORY_REQUIREMENTS = Object.freeze({ growth: 14, momentum: 14, consistency: 2, breakout: 14 })
@@ -145,7 +146,8 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
   }
   if (!scoreWeights?.overall || !scoreWeights?.trending) throw new Error('Shadow scoring requires existing Overall and Trending weights')
 
-  const currentRaw = candidates.map((candidate) => candidate.currentTrendIntensity?.searchVolume)
+  const publicScoringInputs = candidates.map(resolvePublicScoringInputs)
+  const currentRaw = publicScoringInputs.map((input) => input.currentIntensity.value)
   const baselineRaw = candidates.map((candidate) => candidate.baselineDemand?.availability === 'available' ? candidate.baselineDemand.searchVolume : null)
   const currentNormalized = logNormalizeCohort(currentRaw, signalEngine.normalize)
   const baselineNormalized = logNormalizeCohort(baselineRaw, signalEngine.normalize)
@@ -153,7 +155,7 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
     ? elapsedRawShape(candidate, historyWindow)
     : rawShape(candidate, signalEngine))
   const normalizedShape = Object.fromEntries(['growth', 'momentum', 'consistency', 'breakout'].map((component) => [component, normalizeNullable(shapes.map((shape) => shape[component]), signalEngine.normalize)]))
-  const discoveryAcceleration = logNormalizeCohort(candidates.map((candidate) => boundedDiscoveryAcceleration(candidate.currentTrendIntensity?.increasePercentage)), signalEngine.normalize)
+  const discoveryAcceleration = logNormalizeCohort(publicScoringInputs.map((input) => boundedDiscoveryAcceleration(input.fallbackAcceleration)), signalEngine.normalize)
   const referenceTime = candidates.map((candidate) => candidate.currentTrendIntensity?.retrievedAt).filter(Boolean).sort().at(-1) ?? null
 
   const entries = candidates.map((candidate, index) => {
@@ -177,6 +179,8 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
       historyCoverage,
       establishedEligible: evidence.eligible,
       maximumAgeHours: coldStartMaxAgeHours,
+      currentIntensity: currentRaw[index],
+      acceleration: publicScoringInputs[index].fallbackAcceleration,
     }) : null
     const scorable = historyWindow ? evidence.eligible : missingComponents.length === 0
     const establishedTrendingScore = scorable ? (historyWindow ? evidence.scores.trending : weightedScore(components, scoreWeights.trending)) : null
@@ -198,13 +202,33 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
       // This comparison is calculated from the current DataForSEO history response. It is
       // not scheduler-to-scheduler NowRanks history, so retain truthful provenance.
       providerHistoricalGrowthPercent: shapes[index].diagnostics.components?.growth?.growthPercentage ?? null,
-      discoveryIncreasePercentage: candidate.currentTrendIntensity?.increasePercentage ?? null,
+      discoveryIncreasePercentage: publicScoringInputs[index].fallbackAcceleration,
     })
+    const vaultPromotion = candidate.vaultGrowth?.promotion ?? null
+    const growthDiagnostics = {
+      value: growthPresentation.growthPercent,
+      availability: growthPresentation.growthPercent !== null,
+      source: growthPresentation.growthSource,
+      saturation: growthPresentation.growthSaturated,
+      promotion: vaultPromotion,
+      fallbackReason: growthPresentation.growthSource === 'nowranks-history'
+        ? null
+        : vaultPromotion?.reason ?? (growthPresentation.growthSource === 'unavailable' ? 'no-valid-growth-comparison' : 'no-promoted-canonical-growth'),
+    }
     const searchInterestDiagnostic = searchInterest !== null
       ? { status: 'available', reason: null }
       : currentNormalized[index] === null
         ? { status: 'unavailable', reason: 'missing-current-trend-intensity' }
         : { status: 'unavailable', reason: 'missing-baseline-demand' }
+    const heatDiagnostics = resolveTrendHeat({
+      growth: components.growth,
+      momentum: components.momentum,
+      breakout: components.breakout,
+      discoveryAcceleration: discoveryAcceleration[index],
+      currentIntensity: currentNormalized[index],
+      trendingScore: unified.rawScore,
+      pendingReason: currentNormalized[index] === null ? 'missing-current-intensity' : null,
+    })
     return {
       topic: candidate.topic,
       normalizedQuery: candidate.normalizedQuery,
@@ -234,10 +258,34 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
         searchInterest: searchInterestDiagnostic,
         ...shapes[index].diagnostics.components,
       },
+      publicScoringDiagnostics: {
+        discoveryEvidenceUsedForSelection: candidate.currentTrendIntensity !== null && candidate.currentTrendIntensity !== undefined,
+        discoveryMagnitudeUsedInPublicScore: publicScoringInputs[index].discoveryMagnitudeUsedInPublicScore,
+        currentIntensitySource: publicScoringInputs[index].currentIntensity.source,
+        accelerationSource: publicScoringInputs[index].measurementMode === 'global'
+          ? components.growth === null ? 'unavailable' : 'global-history'
+          : publicScoringInputs[index].accelerationSource,
+        baselineSource: publicScoringInputs[index].baselineSource,
+      },
       raw: {
         currentTrendIntensity: candidate.currentTrendIntensity ?? null,
         baselineDemand: candidate.baselineDemand ?? null,
         historicalTrendShape: shapes[index].rawHistory,
+        // These are pre-cohort-normalization score signals, not additional
+        // provider data. Retaining them makes a persisted score decomposition
+        // auditable without changing any calculation.
+        scoringComponents: {
+          currentAttention: currentNormalized[index],
+          baselineDemand: baselineNormalized[index],
+          acceleration: discoveryAcceleration[index],
+          momentum: shapes[index].momentum,
+          consistency: shapes[index].consistency,
+          breakout: shapes[index].breakout,
+          recency: recencyScore({ startedAt: candidate.currentTrendIntensity?.startedAt, retrievedAt: candidate.currentTrendIntensity?.retrievedAt, referenceTime }),
+        },
+        globalCurrentIntensity: publicScoringInputs[index].measurementMode === 'global'
+          ? publicScoringInputs[index].currentIntensity
+          : null,
       },
       normalized: {
         currentTrendIntensity: currentNormalized[index],
@@ -257,15 +305,12 @@ function scoreCohort({ candidates, signalEngine, scoreWeights, historyWindow = n
       unifiedConfidenceReason,
       presentation: {
         ...growthPresentation,
+        growthDiagnostics,
         vaultGrowth: candidate.vaultGrowth
           ? { status: candidate.vaultGrowth.status, reason: candidate.vaultGrowth.reason, growthPercent: candidate.vaultGrowth.growthPercent, confidence: candidate.vaultGrowth.confidence, comparabilityKey: candidate.vaultGrowth.comparabilityKey ?? null }
           : null,
-        trendHeat: trendHeat({
-          growth: components.growth,
-          momentum: components.momentum,
-          breakout: components.breakout,
-          trendingScore: unified.rawScore,
-        }),
+        trendHeat: heatDiagnostics.heatLevel,
+        heatDiagnostics,
       },
       history: {
         count: shapes[index].historyCount,

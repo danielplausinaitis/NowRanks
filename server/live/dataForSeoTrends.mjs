@@ -1,6 +1,7 @@
 import { formatErrorDiagnostics } from '../ingestion/errorDiagnostics.mjs'
 import { buildDataForSeoAuthorization, requireDataForSeoCredentials } from './dataForSeoAuth.mjs'
 import { LiveProviderError } from './providerAdapter.mjs'
+import { mapDataForSeoGraphKeywordColumns, normalizeDataForSeoProviderEchoKeyword } from './providerKeywordIdentity.mjs'
 
 export { requireDataForSeoCredentials } from './dataForSeoAuth.mjs'
 
@@ -26,10 +27,14 @@ function unixTimestamp(value, label) {
   return new Date(value * 1000).toISOString()
 }
 
-export function buildDataForSeoExploreTask({ keywords, locationName, locationCode, dateFrom, dateTo, timeRange, type }) {
+export function buildDataForSeoExploreTask({ keywords, locationName, locationCode, dateFrom, dateTo, timeRange, type, measurementMode }) {
   if (!Array.isArray(keywords) || keywords.length === 0 || keywords.length > DATAFORSEO_MAX_KEYWORDS) throw new Error(`DataForSEO requires one to ${DATAFORSEO_MAX_KEYWORDS} keywords per request`)
   const normalizedKeywords = keywords.map((keyword) => text(keyword, 'DataForSEO keyword'))
-  if ((locationName === undefined) === (locationCode === undefined)) throw new Error('DataForSEO requires exactly one explicit locationName or locationCode')
+  const global = measurementMode === 'global'
+  if (measurementMode !== undefined && !['global', 'us'].includes(measurementMode)) throw new Error('DataForSEO measurementMode must be global or us')
+  if (global) {
+    if (locationName !== undefined || locationCode !== undefined) throw new Error('Global DataForSEO Trends measurement must omit location fields')
+  } else if ((locationName === undefined) === (locationCode === undefined)) throw new Error('DataForSEO requires exactly one explicit locationName or locationCode')
   const task = { keywords: normalizedKeywords }
   if (locationName !== undefined) task.location_name = text(locationName, 'DataForSEO locationName')
   if (locationCode !== undefined) {
@@ -62,6 +67,11 @@ function graphFromResponse(response) {
   return graph
 }
 
+function returnedTargeting(response) {
+  const result = response?.tasks?.[0]?.result?.[0]
+  return { providerReturnedLocation: result?.location_code ?? null, providerReturnedLanguage: result?.language_code ?? null }
+}
+
 function responseFailure({ httpStatus, body, graphIssue = null }) {
   const task = Array.isArray(body?.tasks) ? body.tasks[0] : null
   const error = new Error('DataForSEO Trends returned an unsuccessful or malformed response')
@@ -75,20 +85,103 @@ function hasSuccessfulTask(body) {
   return body?.status_code === 20000 && Array.isArray(body.tasks) && body.tasks.length === 1 && body.tasks[0]?.status_code === 20000 && Array.isArray(body.tasks[0]?.result)
 }
 
+const GRAPH_DIAGNOSTIC_COUNTERS = Object.freeze([
+  'totalGraphPoints',
+  'positiveMeasurements',
+  'zeroMeasurements',
+  'nullMeasurements',
+  'missingValueMeasurements',
+  'negativeMeasurements',
+  'invalidNonNumericMeasurements',
+  'invalidOrMissingMeasurements',
+  'affectedCandidates',
+  'candidatesWithoutUsablePoints',
+])
+
+/** Safe, response-derived diagnostics only. These records never alter provider measurements. */
+export function createDataForSeoGraphDiagnostics() {
+  return {
+    totalGraphPoints: 0,
+    positiveMeasurements: 0,
+    zeroMeasurements: 0,
+    nullMeasurements: 0,
+    missingValueMeasurements: 0,
+    negativeMeasurements: 0,
+    invalidNonNumericMeasurements: 0,
+    invalidOrMissingMeasurements: 0,
+    affectedCandidates: 0,
+    candidatesWithoutUsablePoints: 0,
+    candidateDiagnostics: [],
+  }
+}
+
+/** Combines distinct request-group diagnostics without changing the source observations. */
+export function mergeDataForSeoGraphDiagnostics(target, source) {
+  for (const counter of GRAPH_DIAGNOSTIC_COUNTERS) target[counter] += source[counter] ?? 0
+  target.candidateDiagnostics.push(...(source.candidateDiagnostics ?? []))
+  return target
+}
+
+function candidateGraphDiagnostics({ candidate, graph, requestMetadata, response }) {
+  const firstPoint = graph.data[0]
+  const lastPoint = graph.data.at(-1)
+  const task = response?.tasks?.[0]
+  const returned = returnedTargeting(response)
+  return {
+    canonicalQuery: candidate.query,
+    normalizedQuery: candidate.normalizedQuery,
+    measurementMode: requestMetadata?.measurementMode ?? 'us',
+    measurementTarget: requestMetadata?.measurementTarget ?? null,
+    requestTimeRange: requestMetadata?.time_range ?? null,
+    providerTaskStatusCode: task?.status_code ?? null,
+    providerTaskStatusMessage: task?.status_message ?? null,
+    providerReturnedLocation: returned.providerReturnedLocation,
+    providerReturnedLanguage: returned.providerReturnedLanguage,
+    graphPresent: true,
+    graphValuesAlignedToRequestedKeywords: true,
+    graphPointCount: graph.data.length,
+    firstObservedAt: firstPoint ? unixTimestamp(firstPoint.timestamp, 'graph timestamp') : null,
+    lastObservedAt: lastPoint ? unixTimestamp(lastPoint.timestamp, 'graph timestamp') : null,
+    positiveMeasurements: 0,
+    zeroMeasurements: 0,
+    nullMeasurements: 0,
+    missingValueMeasurements: 0,
+    negativeMeasurements: 0,
+    invalidNonNumericMeasurements: 0,
+    usableCanonicalPoints: 0,
+  }
+}
+
 /**
  * Converts one DataForSEO batch through the existing live adapter. Documented zero values mean
  * insufficient data, so they are represented as explicit missing observations, never invented zero interest.
  */
-function normalizedGraphMeasurement(measurement, diagnostics, candidate) {
+function normalizedGraphMeasurement(measurement, diagnostics, candidateDiagnostics) {
   // DataForSEO graph values are numeric in the transport contract. Do not coerce numeric-looking
   // strings: doing so would silently broaden that contract and could hide provider corruption.
-  if (Number.isFinite(measurement) && measurement >= 0) {
-    return measurement === 0
-      ? { measurement: null, missingReason: 'out-of-range' }
-      : { measurement }
+  diagnostics.totalGraphPoints += 1
+  if (Number.isFinite(measurement) && measurement > 0) {
+    diagnostics.positiveMeasurements += 1
+    candidateDiagnostics.positiveMeasurements += 1
+    candidateDiagnostics.usableCanonicalPoints += 1
+    return { measurement }
   }
+  if (measurement === 0) {
+    diagnostics.zeroMeasurements += 1
+    candidateDiagnostics.zeroMeasurements += 1
+    return { measurement: null, missingReason: 'out-of-range' }
+  }
+  const counter = measurement === null
+    ? 'nullMeasurements'
+    : measurement === undefined
+      ? 'missingValueMeasurements'
+      : typeof measurement === 'number' && measurement < 0
+        ? 'negativeMeasurements'
+        : 'invalidNonNumericMeasurements'
+  diagnostics[counter] += 1
+  candidateDiagnostics[counter] += 1
   diagnostics.invalidOrMissingMeasurements += 1
-  diagnostics.affectedCandidates.add(candidate.normalizedQuery)
+  diagnostics.affectedCandidateQueries.add(candidateDiagnostics.normalizedQuery)
   return { measurement: null, missingReason: 'invalid-provider-measurement' }
 }
 
@@ -100,18 +193,26 @@ export function normalizeDataForSeoMeasurementWithDiagnostics({ response, candid
   if (!adapter?.normalize) throw new Error('A live provider adapter is required')
   if (!Array.isArray(candidates) || candidates.length === 0 || candidates.length > DATAFORSEO_MAX_KEYWORDS) throw new Error(`DataForSEO normalization requires one to ${DATAFORSEO_MAX_KEYWORDS} candidates`)
   const graph = graphFromResponse(response)
-  if (graph.keywords.length !== candidates.length || graph.keywords.some((keyword, index) => keyword !== candidates[index].query)) throw new Error('DataForSEO graph keywords do not match the requested candidate order')
-  const diagnostics = { invalidOrMissingMeasurements: 0, affectedCandidates: new Set() }
+  const keywordMapping = mapDataForSeoGraphKeywordColumns({
+    requestedKeywords: candidates.map((candidate) => candidate.query),
+    returnedKeywords: graph.keywords,
+    normalizeKeyword: normalizeDataForSeoProviderEchoKeyword,
+    providerLabel: 'DataForSEO Trends',
+  })
+  const diagnostics = createDataForSeoGraphDiagnostics()
+  const internalDiagnostics = { ...diagnostics, affectedCandidateQueries: new Set() }
+  const candidateDiagnosticsByIndex = candidates.map((candidate) => candidateGraphDiagnostics({ candidate, graph, requestMetadata, response }))
   const topics = candidates.map((candidate, index) => ({
     sourceId: candidate.sourceId ?? candidate.normalizedQuery,
     query: candidate.query,
     normalizedQuery: candidate.normalizedQuery,
     category: candidate.category,
     observations: graph.data.map((point) => {
-      if (!Array.isArray(point.values) || point.values.length !== candidates.length) throw new Error('DataForSEO graph values do not match requested keywords')
-      const measurement = point.values[index]
-      const observedAt = unixTimestamp(point.timestamp, 'graph timestamp')
-      return { observedAt, ...normalizedGraphMeasurement(measurement, diagnostics, candidate) }
+      if (!Array.isArray(point?.values) || point.values.length !== graph.keywords.length) throw new Error('DataForSEO Trends graph values do not match returned keywords')
+      const returnedKeywordIndex = keywordMapping.returnedIndexByRequestIndex[index]
+      const measurement = point.values[returnedKeywordIndex]
+      const observedAt = unixTimestamp(point?.timestamp, 'graph timestamp')
+      return { observedAt, ...normalizedGraphMeasurement(measurement, internalDiagnostics, candidateDiagnosticsByIndex[index]) }
     }),
   }))
   const normalized = adapter.normalize({
@@ -128,12 +229,20 @@ export function normalizeDataForSeoMeasurementWithDiagnostics({ response, candid
     },
     topics,
   }, { retrievedAt })
+  const providerTargeting = returnedTargeting(response)
   const histories = normalized.map((topic) => ({
     ...topic,
+    measurementProvenance: {
+      measurementMode: requestMetadata?.measurementMode ?? 'us', measurementTarget: requestMetadata?.measurementTarget ?? null,
+      measurementLocation: geographicScope, measurementLanguage: providerTargeting.providerReturnedLanguage,
+      ...providerTargeting,
+    },
     historyRequest: requestMetadata ? {
       timeRange: requestMetadata.time_range ?? null,
       dateFrom: requestMetadata.date_from ?? null,
       dateTo: requestMetadata.date_to ?? null,
+      measurementMode: requestMetadata.measurementMode ?? 'us',
+      measurementTarget: requestMetadata.measurementTarget ?? null,
     } : null,
     retrievedAt,
     observations: topic.observations.map((observation, pointIndex) => {
@@ -145,7 +254,11 @@ export function normalizeDataForSeoMeasurementWithDiagnostics({ response, candid
       }
     }),
   }))
-  return { histories, diagnostics: { invalidOrMissingMeasurements: diagnostics.invalidOrMissingMeasurements, affectedCandidates: diagnostics.affectedCandidates.size } }
+  internalDiagnostics.affectedCandidates = internalDiagnostics.affectedCandidateQueries.size
+  internalDiagnostics.candidatesWithoutUsablePoints = candidateDiagnosticsByIndex.filter((candidate) => candidate.usableCanonicalPoints === 0).length
+  internalDiagnostics.candidateDiagnostics = candidateDiagnosticsByIndex
+  const { affectedCandidateQueries: _affectedCandidateQueries, ...publicDiagnostics } = internalDiagnostics
+  return { histories, diagnostics: publicDiagnostics }
 }
 
 /** Backwards-compatible history-only normalizer for standalone callers. */

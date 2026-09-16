@@ -192,6 +192,15 @@ describe('read-only leaderboard HTTP API handler', () => {
     expect(result.json.emerging).toBeUndefined()
   })
 
+  it('serializes persisted Heat diagnostics without recomputing a public Heat level', async () => {
+    const unified = {
+      rankingMode: 'unified', snapshot: { cycleId: 'cycle-unified', selectedWindow: '24H', scoredAt: '2026-09-04T00:00:00.000Z', snapshotFormatVersion: 2 }, compatibility: { status: 'supported', diagnostics: [] },
+      entries: [{ ...liveResult().established[0], publicRank: 1, publicScore: 86, evidenceStatus: 'emerging', trendHeat: 'stable', heatStatus: 'available', heatLevel: 'stable', heatEvidenceAvailable: true, heatEvidenceSource: 'current-intensity', heatFallbackUsed: true, heatPendingReason: null, scoreLane: undefined, laneRank: undefined }],
+    }
+    const result = await response(createApiHandler({ dataSource: 'live', liveLeaderboardRead: vi.fn(async () => unified), logger: { error: vi.fn() } }), '/api/leaderboard?window=24H')
+    expect(result.json.entries[0]).toMatchObject({ trendHeat: 'stable', heatStatus: 'available', heatLevel: 'stable', heatEvidenceAvailable: true, heatEvidenceSource: 'current-intensity', heatFallbackUsed: true, heatPendingReason: null })
+  })
+
   it('returns an explicit 404 for a missing live snapshot with no replay fallback', async () => {
     const replay = { getLeaderboard: vi.fn() }
     const liveLeaderboardRead = vi.fn(async () => { const error = new Error('No live snapshot exists'); error.code = 'live_snapshot_not_found'; throw error })

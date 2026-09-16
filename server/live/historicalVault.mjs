@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { CROSS_QUERY_COMPARABILITY_STATUSES } from './provenanceComparability.mjs'
 
 export const VAULT_METRICS = Object.freeze({
   SERPAPI_TRENDING_SEARCH_VOLUME: 'serpapi-trending-search-volume',
@@ -6,7 +7,7 @@ export const VAULT_METRICS = Object.freeze({
 })
 
 export const VAULT_GROWTH_MODES = Object.freeze(['off', 'shadow', 'preferred'])
-export const VAULT_COMPARABILITY_STATUSES = Object.freeze(['comparable', 'not-comparable', 'unknown'])
+export const VAULT_COMPARABILITY_STATUSES = CROSS_QUERY_COMPARABILITY_STATUSES
 
 function text(value, label) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`Vault ${label} is required`)

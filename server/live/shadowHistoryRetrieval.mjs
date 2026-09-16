@@ -1,4 +1,4 @@
-import { DATAFORSEO_MAX_KEYWORDS, normalizeDataForSeoMeasurementWithDiagnostics } from './dataForSeoTrends.mjs'
+import { DATAFORSEO_MAX_KEYWORDS, createDataForSeoGraphDiagnostics, mergeDataForSeoGraphDiagnostics, normalizeDataForSeoMeasurementWithDiagnostics } from './dataForSeoTrends.mjs'
 
 export const SHADOW_TRENDS_MODES = Object.freeze(['single', 'batched'])
 
@@ -44,7 +44,7 @@ export async function retrieveShadowTrendHistories({
   if (!client?.measure) throw new Error('Shadow Trends retrieval requires a DataForSEO client')
   const groups = createShadowTrendRequestGroups(candidates, mode)
   const histories = []
-  let cost = 0; const graphMeasurements = { invalidOrMissingMeasurements: 0, affectedCandidates: 0 }
+  let cost = 0; const graphMeasurements = createDataForSeoGraphDiagnostics()
 
   for (const group of groups) {
     const measured = await client.measure({
@@ -58,11 +58,10 @@ export async function retrieveShadowTrendHistories({
       geographicScope,
       retrievedAt: measured.retrievedAt,
       adapter,
-      requestMetadata: measured.task,
+      requestMetadata: { ...measured.task, measurementMode: request.measurementMode ?? 'us', measurementTarget: request.measurementTarget ?? null },
     })
     histories.push(...normalized.histories)
-    graphMeasurements.invalidOrMissingMeasurements += normalized.diagnostics.invalidOrMissingMeasurements
-    graphMeasurements.affectedCandidates += normalized.diagnostics.affectedCandidates
+    mergeDataForSeoGraphDiagnostics(graphMeasurements, normalized.diagnostics)
   }
 
   return { histories, requestCount: groups.length, providerCost: cost, graphMeasurements }

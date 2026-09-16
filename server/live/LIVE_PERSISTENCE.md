@@ -37,7 +37,7 @@ A succeeded cycle is a no-op. A failed cycle can retry the same rows. A recent r
 
 ## Safety configuration
 
-`LIVE_INGEST_DRY_RUN=true` is the default. It performs provider discovery, measurement, scoring, and plan construction but never creates a Supabase client or calls a repository.
+`LIVE_INGEST_DRY_RUN=true` is the default. It performs provider discovery, measurement, scoring, and plan construction but performs no Supabase writes. The Google Trends cache repository is bypassed entirely in this mode, so its storage migration is not required for a dry run.
 
 Real writes require both:
 
